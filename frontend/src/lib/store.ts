@@ -2,7 +2,7 @@
  * Zustand store for pipeline state management
  */
 import { create } from "zustand";
-import { SSEEvent, HITLPendingData, SearchResult } from "./api";
+import { SSEEvent, HITLPendingData } from "./api";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -20,6 +20,12 @@ export interface Message {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: Date;
+  showQuickReplies?: boolean;
+  quickReplyData?: {
+    query: string;
+    resourceCount: number;
+  };
+  isNew?: boolean;
 }
 
 export interface AgentNode {
@@ -27,6 +33,14 @@ export interface AgentNode {
   status: "pending" | "running" | "done" | "error";
   latencyMs?: number;
 }
+
+export interface SourcePickerData {
+  query: string;
+  resourceCount: number;
+  categoryCount: number;
+  categories: string[];
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STORE
@@ -45,17 +59,27 @@ interface PipelineStore {
   // HITL
   hitlData: HITLPendingData | null;
   showHITLModal: boolean;
+
+  // Source selection
+  showSourcePicker: boolean;
+  sourcePickerData: SourcePickerData | null;
   
   // Answer
   answer: string | null;
   error: string | null;
   
   // Actions
-  startJob: (jobId: string, topic: string) => void;
+  startJob: (
+    jobId: string,
+    topic: string,
+    options?: { skipUserMessage?: boolean }
+  ) => void;
   handleSSEEvent: (event: SSEEvent) => void;
-  addMessage: (role: Message["role"], content: string) => void;
+  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData'>>) => void;
   setHITLData: (data: HITLPendingData) => void;
   closeHITLModal: () => void;
+  openSourcePicker: (data: SourcePickerData) => void;
+  closeSourcePicker: () => void;
   reset: () => void;
 }
 
@@ -67,6 +91,8 @@ const initialState = {
   messages: [],
   hitlData: null,
   showHITLModal: false,
+  showSourcePicker: false,
+  sourcePickerData: null,
   answer: null,
   error: null,
 };
@@ -74,7 +100,7 @@ const initialState = {
 export const usePipelineStore = create<PipelineStore>((set, get) => ({
   ...initialState,
   
-  startJob: (jobId: string, topic: string) => {
+  startJob: (jobId: string, topic: string, options) => {
     set({
       jobId,
       status: "running",
@@ -82,12 +108,16 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       nodes: [],
       hitlData: null,
       showHITLModal: false,
+      showSourcePicker: false,
+      sourcePickerData: null,
       answer: null,
       error: null,
     });
     
     // Add user message
-    get().addMessage("user", topic);
+    if (!options?.skipUserMessage) {
+      get().addMessage("user", topic);
+    }
     get().addMessage("system", "🚀 Pipeline started...");
   },
   
@@ -130,7 +160,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           status: "completed",
           answer: data.answer as string,
         });
-        get().addMessage("assistant", data.answer as string);
+        get().addMessage("assistant", data.answer as string, { isNew: true });
         break;
         
       case "error":
@@ -147,7 +177,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     }
   },
   
-  addMessage: (role, content) => {
+  addMessage: (role, content, options) => {
     set((state) => ({
       messages: [
         ...state.messages,
@@ -156,6 +186,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           role,
           content,
           timestamp: new Date(),
+          isNew: options?.isNew,
+          showQuickReplies: options?.showQuickReplies,
+          quickReplyData: options?.quickReplyData,
         },
       ],
     }));
@@ -167,6 +200,14 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   
   closeHITLModal: () => {
     set({ showHITLModal: false });
+  },
+
+  openSourcePicker: (data) => {
+    set({ showSourcePicker: true, sourcePickerData: data });
+  },
+
+  closeSourcePicker: () => {
+    set({ showSourcePicker: false, sourcePickerData: null });
   },
   
   reset: () => {

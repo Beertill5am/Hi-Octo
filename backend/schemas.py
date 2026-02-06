@@ -17,6 +17,13 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class RunMode(str, Enum):
+    """Execution mode for the pipeline."""
+    RAG = "rag"
+    LLM = "llm"
+    WEB = "web"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # REQUEST MODELS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -25,6 +32,22 @@ class PipelineRunRequest(BaseModel):
     """Request to start a pipeline run."""
     topic: str = Field(..., description="The topic/query to process")
     categories: Optional[List[str]] = Field(None, description="Override available categories")
+    mode: RunMode = Field(default=RunMode.RAG, description="Execution mode")
+
+
+class IntentRequest(BaseModel):
+    """Request to classify user intent before running pipeline."""
+    query: str = Field(..., description="Raw user input")
+
+
+class IntentResponse(BaseModel):
+    """Response for intent classification."""
+    action: str = Field(..., description="greeting | clarify | choose_source | run_pipeline")
+    message: str = Field(..., description="UX message to show user")
+    examples: List[str] = Field(default_factory=list, description="Example prompts")
+    resource_count: int = 0
+    category_count: int = 0
+    categories: List[str] = Field(default_factory=list)
 
 
 class HITLDecision(BaseModel):

@@ -14,22 +14,38 @@ resource_repo = ResourceRepository()
 
 @router.get("", response_model=list[CategoryResponse])
 async def list_categories():
-    """List categories from DB and vectorstore."""
-    category_repo.refresh_counts()
-    db_categories = {item["name"]: item for item in category_repo.list()}
+    """List categories from DB and vectorstore with document counts."""
+    from ..content_manager import get_vectorstore
+    
+    # Get categories from vectorstore
     vector_categories = list_vectorstore_categories()
-
-    for name in vector_categories:
+    
+    # Get document counts per category from vectorstore
+    vectorstore = get_vectorstore()
+    category_counts = {}
+    try:
+        all_docs = vectorstore.get(include=['metadatas'])
+        for meta in all_docs.get('metadatas', []):
+            if meta and 'category' in meta:
+                cat = meta['category']
+                category_counts[cat] = category_counts.get(cat, 0) + 1
+    except Exception:
+        pass
+    
+    # Merge with DB categories
+    db_categories = {item["name"]: item for item in category_repo.list()}
+    
+    result = []
+    for name in set(vector_categories) | set(db_categories.keys()):
         if name not in db_categories:
             category_repo.ensure(name)
-            db_categories[name] = {
-                "name": name,
-                "description": None,
-                "resource_count": 0,
-            }
-
-    category_repo.refresh_counts()
-    return list(db_categories.values())
+        result.append({
+            "name": name,
+            "description": db_categories.get(name, {}).get("description"),
+            "resource_count": category_counts.get(name, 0),
+        })
+    
+    return sorted(result, key=lambda x: x["name"])
 
 
 @router.post("", response_model=CategoryResponse)

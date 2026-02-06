@@ -14,6 +14,17 @@ export interface PipelineRunResponse {
   message: string;
 }
 
+export type RunMode = "rag" | "llm" | "web";
+
+export interface IntentResponse {
+  action: "greeting" | "clarify" | "choose_source" | "run_pipeline";
+  message: string;
+  examples: string[];
+  resource_count: number;
+  category_count: number;
+  categories: string[];
+}
+
 export interface SearchResult {
   title: string;
   url: string;
@@ -49,11 +60,14 @@ export interface SSEEvent {
 /**
  * Start a pipeline run
  */
-export async function startPipeline(topic: string): Promise<PipelineRunResponse> {
+export async function startPipeline(
+  topic: string,
+  mode: RunMode = "rag"
+): Promise<PipelineRunResponse> {
   const response = await fetch(`${API_BASE}/pipeline/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topic }),
+    body: JSON.stringify({ topic, mode }),
   });
   
   if (!response.ok) {
@@ -62,6 +76,24 @@ export async function startPipeline(topic: string): Promise<PipelineRunResponse>
   
   return response.json();
 }
+
+/**
+ * Classify intent before running the pipeline
+ */
+export async function getIntent(query: string): Promise<IntentResponse> {
+  const response = await fetch(`${API_BASE}/pipeline/intent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to classify intent: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
 
 /**
  * Subscribe to pipeline status updates via SSE

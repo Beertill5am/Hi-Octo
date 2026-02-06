@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Callable, AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum
+from langchain_ollama import ChatOllama
+from web_search_agent import WebSearchAgent
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,6 +31,7 @@ class PipelineJob:
     """Tracks a single pipeline execution."""
     job_id: str
     topic: str
+    mode: str = "rag"
     status: JobStatus = JobStatus.PENDING
     created_at: datetime = field(default_factory=datetime.now)
     
@@ -47,15 +50,7 @@ class PipelineJob:
 
 
 class PipelineRunner:
-    """
-    Manages pipeline jobs and provides async interface for API.
-    
-    Usage:
-        runner = PipelineRunner()
-        job_id = await runner.start_job("Python decorators")
-        async for event in runner.stream_events(job_id):
-            print(event)
-    """
+    """Manages pipeline jobs and provides async interface for API."""
     
     def __init__(self):
         self.jobs: Dict[str, PipelineJob] = {}
@@ -102,7 +97,7 @@ class PipelineRunner:
             raise
 
     
-    async def start_job(self, topic: str, categories: list = None) -> str:
+    async def start_job(self, topic: str, categories: list = None, mode: str = "rag") -> str:
         """
         Start a new pipeline job.
         Returns job_id immediately, runs pipeline in background.
@@ -113,6 +108,7 @@ class PipelineRunner:
         job = PipelineJob(
             job_id=job_id,
             topic=topic,
+            mode=mode,
             hitl_event=asyncio.Event()
         )
         self.jobs[job_id] = job
@@ -128,6 +124,14 @@ class PipelineRunner:
             job.status = JobStatus.RUNNING
             await self._emit_event(job, "status_change", {"status": "running"})
             
+            if job.mode == "llm":
+                await self._run_llm_job(job)
+                return
+
+            if job.mode == "web":
+                await self._run_web_job(job)
+                return
+
             # Initialize pipeline if needed
             self.initialize_pipeline()
             
@@ -159,6 +163,48 @@ class PipelineRunner:
             job.status = JobStatus.FAILED
             job.error = str(e)
             await self._emit_event(job, "error", {"error": str(e)})
+
+    async def _run_llm_job(self, job: PipelineJob):
+        """Run a lightweight LLM-only response (no retrieval)."""
+        await self._emit_event(job, "pipeline_start", {"topic": job.topic, "mode": "llm"})
+        llm = ChatOllama(model="qwen3:8b", temperature=0.3, num_ctx=4096)
+        prompt = (
+            "You are Octo, a friendly assistant. Answer clearly and briefly. "
+            "If the user is vague, ask a clarifying question.\n\n"
+            f"User question: {job.topic}"
+        )
+        response = llm.invoke(prompt)
+        job.answer = response.content if response else "No answer generated."
+        job.status = JobStatus.COMPLETED
+        await self._emit_event(job, "complete", {"answer": job.answer})
+
+    async def _run_web_job(self, job: PipelineJob):
+        """Run a web-search-first response."""
+        await self._emit_event(job, "pipeline_start", {"topic": job.topic, "mode": "web"})
+        await self._emit_event(job, "status_change", {"status": "running"})
+        search_agent = WebSearchAgent()
+        search_response = search_agent.search(job.topic, expand=False)
+        results = search_response.get("results", [])
+        if not results:
+            job.answer = "I couldn't find relevant web results. Try rephrasing or use your local knowledge base."
+            job.status = JobStatus.COMPLETED
+            await self._emit_event(job, "complete", {"answer": job.answer})
+            return
+
+        snippets = "\n\n".join(
+            f"- {r.get('title', 'Untitled')}: {r.get('content', r.get('snippet', ''))[:500]}" for r in results[:5]
+        )
+        llm = ChatOllama(model="qwen3:8b", temperature=0.3, num_ctx=4096)
+        prompt = (
+            "You are Octo. Use the web snippets below to answer the user's question. "
+            "Be concise and include 2-3 bullet citations by source title.\n\n"
+            f"Question: {job.topic}\n\n"
+            f"Web snippets:\n{snippets}"
+        )
+        response = llm.invoke(prompt)
+        job.answer = response.content if response else "No answer generated."
+        job.status = JobStatus.COMPLETED
+        await self._emit_event(job, "complete", {"answer": job.answer})
     
     async def _emit_event(self, job: PipelineJob, event_type: str, data: dict):
         """Push event to job's queue for SSE streaming."""
