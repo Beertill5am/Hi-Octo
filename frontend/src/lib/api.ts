@@ -31,11 +31,33 @@ export interface SearchResult {
   snippet: string;
 }
 
+/**
+ * Enhanced search result with full transparency metadata
+ * for HITL approval flow
+ */
+export interface EnhancedSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  full_content?: string;  // Full markdown for preview
+  relevance_score: number;  // 0.0-1.0
+  domain: string;  // e.g., "python.org"
+  word_count: number;
+  retrieved_at: string;
+}
+
 export interface HITLPendingData {
   job_id: string;
   query: string;
   ai_summary?: string;
-  search_results: SearchResult[];
+  search_results: EnhancedSearchResult[];
+  // Transparency metadata
+  total_results_found: number;
+  results_shown: number;
+  search_depth: string;  // "basic" or "advanced"
+  search_latency_ms: number;
+  reason_for_web_search: string;  // WHY search triggered
+  requires_approval: boolean;
   message: string;
 }
 
@@ -124,6 +146,10 @@ export function subscribeToPipelineStatus(
   
   eventSource.addEventListener("hitl_pending", (event) => {
     onEvent({ event: "hitl_pending", data: JSON.parse((event as MessageEvent).data) });
+  });
+  
+  eventSource.addEventListener("web_results", (event) => {
+    onEvent({ event: "web_results", data: JSON.parse((event as MessageEvent).data) });
   });
   
   eventSource.addEventListener("complete", (event) => {

@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 import { CopyButton } from "./CopyButton";
 import { TypewriterText } from "./TypewriterText";
 import { QuickReplies } from "./QuickReplies";
+import { WebSearchResultsInline } from "./WebSearchResultsInline";
 
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user";
@@ -39,7 +40,33 @@ function MessageBubble({ message }: { message: Message }) {
               : "text-foreground"
           }`}
         >
-          {isAssistant ? (
+          {/* Inline Web Search Results */}
+          {message.webResults ? (
+            <WebSearchResultsInline
+              results={message.webResults.results}
+              summary={message.webResults.summary}
+              query={message.webResults.query}
+              totalFound={message.webResults.total_found}
+              searchLatencyMs={message.webResults.search_latency_ms}
+              showReportOption={message.showReportOption}
+              onGenerateReport={() => {
+                // Focus input and suggest report query
+                const input = document.querySelector('input[type="text"]') as HTMLInputElement;
+                if (input) {
+                  input.value = `Generate a detailed report on: ${message.webResults?.query}`;
+                  input.focus();
+                }
+              }}
+              onNewQuery={() => {
+                // Clear and focus input
+                const input = document.querySelector('input[type="text"]') as HTMLInputElement;
+                if (input) {
+                  input.value = "";
+                  input.focus();
+                }
+              }}
+            />
+          ) : isAssistant ? (
             <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-violet-400 prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground">
               {message.isNew && !showFullText ? (
                 <TypewriterText

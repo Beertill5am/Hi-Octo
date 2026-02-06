@@ -11,7 +11,8 @@ from typing import Dict, Any, Optional, Callable, AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum
 from langchain_ollama import ChatOllama
-from web_search_agent import WebSearchAgent
+from web_search_agent import WebSearchAgent, extract_domain
+import time
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -44,6 +45,7 @@ class PipelineJob:
     hitl_data: Optional[Dict[str, Any]] = None
     hitl_event: Optional[asyncio.Event] = None
     hitl_approved: Optional[bool] = None
+    hitl_rejection_reason: Optional[str] = None  # User feedback on rejection
     
     # Event streaming
     event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
@@ -179,32 +181,94 @@ class PipelineRunner:
         await self._emit_event(job, "complete", {"answer": job.answer})
 
     async def _run_web_job(self, job: PipelineJob):
-        """Run a web-search-first response."""
+        """
+        Run a web-search response - streams results directly to chat.
+        No approval needed - user already chose web search explicitly.
+        """
         await self._emit_event(job, "pipeline_start", {"topic": job.topic, "mode": "web"})
-        await self._emit_event(job, "status_change", {"status": "running"})
+        await self._emit_event(job, "node_start", {"node": "web_search"})
+        
+        # Track timing for transparency
+        search_start = time.time()
+        
         search_agent = WebSearchAgent()
         search_response = search_agent.search(job.topic, expand=False)
-        results = search_response.get("results", [])
-        if not results:
+        
+        search_latency_ms = (time.time() - search_start) * 1000
+        
+        raw_results = search_response.get("results", [])
+        ai_summary = search_response.get("answer")
+        
+        await self._emit_event(job, "node_end", {
+            "node": "web_search", 
+            "latency_ms": search_latency_ms,
+            "results_count": len(raw_results)
+        })
+        
+        if not raw_results:
             job.answer = "I couldn't find relevant web results. Try rephrasing or use your local knowledge base."
             job.status = JobStatus.COMPLETED
             await self._emit_event(job, "complete", {"answer": job.answer})
             return
-
-        snippets = "\n\n".join(
-            f"- {r.get('title', 'Untitled')}: {r.get('content', r.get('snippet', ''))[:500]}" for r in results[:5]
-        )
-        llm = ChatOllama(model="qwen3:8b", temperature=0.3, num_ctx=4096)
-        prompt = (
-            "You are Octo. Use the web snippets below to answer the user's question. "
-            "Be concise and include 2-3 bullet citations by source title.\n\n"
-            f"Question: {job.topic}\n\n"
-            f"Web snippets:\n{snippets}"
-        )
-        response = llm.invoke(prompt)
-        job.answer = response.content if response else "No answer generated."
+        
+        # Build enhanced results with full metadata
+        enhanced_results = []
+        for r in raw_results[:10]:  # Up to 10 results
+            url = r.url if hasattr(r, 'url') else r.get('url', '')
+            content = r.content if hasattr(r, 'content') else r.get('content', '')
+            raw_content = r.raw_content if hasattr(r, 'raw_content') else r.get('raw_content', content)
+            enhanced_results.append({
+                "title": r.title if hasattr(r, 'title') else r.get('title', 'Untitled'),
+                "url": url,
+                "snippet": content[:300] if content else "",
+                "full_content": raw_content[:5000] if raw_content else content[:2000],
+                "relevance_score": r.score if hasattr(r, 'score') else r.get('score', 0.0),
+                "domain": extract_domain(url),
+                "word_count": len((raw_content or content or "").split()),
+                "retrieved_at": r.timestamp if hasattr(r, 'timestamp') else r.get('timestamp', "")
+            })
+        
+        # Sort by relevance score (highest first)
+        enhanced_results.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+        
+        # Generate AI summary if not provided by Tavily
+        if not ai_summary:
+            await self._emit_event(job, "node_start", {"node": "summarize"})
+            
+            snippets = "\n".join(
+                f"- {r['title']}: {r['snippet'][:200]}" 
+                for r in enhanced_results[:5]
+            )
+            
+            llm = ChatOllama(model="qwen3:8b", temperature=0.3, num_ctx=4096)
+            summary_prompt = (
+                "Based on these web search results, write a brief 2-3 sentence summary "
+                "of the key findings. Be concise and informative.\n\n"
+                f"Query: {job.topic}\n\n"
+                f"Results:\n{snippets}"
+            )
+            summary_response = llm.invoke(summary_prompt)
+            ai_summary = summary_response.content if summary_response else "Summary not available."
+            
+            await self._emit_event(job, "node_end", {"node": "summarize"})
+        
+        # Emit web results directly to chat (no HITL - inline display)
+        await self._emit_event(job, "web_results", {
+            "results": enhanced_results,
+            "summary": ai_summary,
+            "total_found": len(raw_results),
+            "query": job.topic,
+            "search_latency_ms": search_latency_ms
+        })
+        
+        # Mark job complete - results are now displayed, user can choose next action
+        job.answer = ai_summary  # Store summary as the answer
         job.status = JobStatus.COMPLETED
-        await self._emit_event(job, "complete", {"answer": job.answer})
+        await self._emit_event(job, "complete", {
+            "answer": ai_summary,
+            "results_count": len(enhanced_results),
+            "show_report_option": True  # Frontend will show "Generate report" option
+        })
     
     async def _emit_event(self, job: PipelineJob, event_type: str, data: dict):
         """Push event to job's queue for SSE streaming."""

@@ -26,6 +26,23 @@ export interface Message {
     resourceCount: number;
   };
   isNew?: boolean;
+  // For inline web search results
+  webResults?: {
+    results: Array<{
+      title: string;
+      url: string;
+      snippet: string;
+      full_content?: string;
+      relevance_score: number;
+      domain: string;
+      word_count: number;
+    }>;
+    summary: string;
+    query: string;
+    total_found: number;
+    search_latency_ms: number;
+  };
+  showReportOption?: boolean;
 }
 
 export interface AgentNode {
@@ -75,7 +92,7 @@ interface PipelineStore {
     options?: { skipUserMessage?: boolean }
   ) => void;
   handleSSEEvent: (event: SSEEvent) => void;
-  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData'>>) => void;
+  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption'>>) => void;
   setHITLData: (data: HITLPendingData) => void;
   closeHITLModal: () => void;
   openSourcePicker: (data: SourcePickerData) => void;
@@ -155,12 +172,25 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         get().addMessage("system", "⏸️ Waiting for your approval on web search results...");
         break;
         
+      case "web_results":
+        // Display web search results inline in chat
+        console.log("[DEBUG] web_results event received:", data);
+        get().addMessage("assistant", "", {
+          isNew: true,
+          webResults: data as Message["webResults"],
+          showReportOption: true,
+        });
+        break;
+        
       case "complete":
         set({
           status: "completed",
           answer: data.answer as string,
         });
-        get().addMessage("assistant", data.answer as string, { isNew: true });
+        // Only add message if web_results didn't already add one
+        if (!data.show_report_option) {
+          get().addMessage("assistant", data.answer as string, { isNew: true });
+        }
         break;
         
       case "error":
@@ -189,6 +219,8 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           isNew: options?.isNew,
           showQuickReplies: options?.showQuickReplies,
           quickReplyData: options?.quickReplyData,
+          webResults: options?.webResults,
+          showReportOption: options?.showReportOption,
         },
       ],
     }));

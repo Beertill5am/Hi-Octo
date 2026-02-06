@@ -17,8 +17,22 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from tavily import TavilyClient
 from content_filter import UniversalContentFilter
+from urllib.parse import urlparse
 
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+
+
+def extract_domain(url: str) -> str:
+    """Extract clean domain from URL (e.g., 'python.org' from 'https://docs.python.org/3/...')."""
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        # Remove www. prefix
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        return domain
+    except Exception:
+        return "unknown"
 
 @dataclass
 class SearchResult:
@@ -60,10 +74,10 @@ class WebSearchTool:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        max_results: int = 5,
+        max_results: int = 10,  # 10 results for inline display
         search_depth: str = "basic",  # "basic" or "advanced"
         include_answer: bool = True,
-        include_raw_content: bool = False,
+        include_raw_content: bool = True,  # Enable for HITL content preview
     ):
         """
         Initialize Tavily search tool.

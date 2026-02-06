@@ -112,19 +112,46 @@ class PipelineRunResponse(BaseModel):
 
 
 class SearchResultItem(BaseModel):
-    """A single web search result."""
+    """A single web search result (basic)."""
     title: str
     url: str
     snippet: str
 
 
+class EnhancedSearchResult(BaseModel):
+    """
+    Enhanced search result with full transparency metadata.
+    Used in HITL approval flow for professional UX.
+    """
+    title: str = Field(..., description="Page title")
+    url: str = Field(..., description="Full URL")
+    snippet: str = Field(..., description="Short snippet for card display")
+    full_content: Optional[str] = Field(None, description="Full markdown content for preview")
+    relevance_score: float = Field(0.0, ge=0.0, le=1.0, description="Relevance score 0.0-1.0")
+    domain: str = Field("", description="Extracted domain (e.g., python.org)")
+    word_count: int = Field(0, description="Content word count")
+    retrieved_at: str = Field("", description="ISO timestamp when retrieved")
+
+
 class HITLPendingData(BaseModel):
-    """Data shown to user during HITL checkpoint."""
+    """
+    Data shown to user during HITL checkpoint.
+    Provides full transparency for informed decision-making.
+    """
     job_id: str
     query: str
     ai_summary: Optional[str] = None
-    search_results: List[SearchResultItem] = []
-    estimated_tokens: Optional[int] = None
+    search_results: List[EnhancedSearchResult] = Field(default_factory=list)
+    # Transparency metadata
+    total_results_found: int = Field(0, description="Total results from search")
+    results_shown: int = Field(0, description="Number shown after filtering")
+    search_depth: str = Field("basic", description="basic or advanced")
+    search_latency_ms: float = Field(0.0, description="How long search took")
+    reason_for_web_search: str = Field(
+        "", 
+        description="WHY web search was triggered (transparency)"
+    )
+    requires_approval: bool = Field(True, description="Must wait for explicit approval")
     message: str = "Review search results before generation"
 
 

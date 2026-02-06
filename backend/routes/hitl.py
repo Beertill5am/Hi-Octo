@@ -1,10 +1,11 @@
 """
 HITL Routes - /hitl/* endpoints
 Human-in-the-Loop approval/rejection for web search results.
+Full transparency: scores, domains, latency, and reasons displayed.
 """
 from fastapi import APIRouter, HTTPException
 
-from ..schemas import HITLDecision, HITLPendingData, SearchResultItem, JobStatus
+from ..schemas import HITLDecision, HITLPendingData, EnhancedSearchResult, JobStatus
 from ..pipeline_runner import runner
 
 router = APIRouter(prefix="/hitl", tags=["HITL"])
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/hitl", tags=["HITL"])
 async def get_pending_hitl(job_id: str):
     """
     Get HITL checkpoint data for a job waiting for approval.
-    Returns search results and context for user decision.
+    Returns enhanced search results with full transparency metadata.
     """
     job = runner.get_job(job_id)
     if not job:
@@ -28,21 +29,32 @@ async def get_pending_hitl(job_id: str):
     
     hitl_data = job.hitl_data or {}
     
-    # Convert raw results to schema
+    # Convert to enhanced schema with full metadata
     search_results = []
     for result in hitl_data.get("results", []):
         if isinstance(result, dict):
-            search_results.append(SearchResultItem(
-                title=result.get("title", "No title"),
+            search_results.append(EnhancedSearchResult(
+                title=result.get("title", "Untitled"),
                 url=result.get("url", ""),
-                snippet=result.get("content", result.get("snippet", ""))[:200]
+                snippet=result.get("snippet", ""),
+                full_content=result.get("full_content"),
+                relevance_score=result.get("relevance_score", 0.0),
+                domain=result.get("domain", ""),
+                word_count=result.get("word_count", 0),
+                retrieved_at=result.get("retrieved_at", "")
             ))
     
     return HITLPendingData(
         job_id=job_id,
         query=job.topic,
         ai_summary=hitl_data.get("ai_answer"),
-        search_results=search_results[:5],
+        search_results=search_results,
+        total_results_found=hitl_data.get("total_results_found", len(search_results)),
+        results_shown=len(search_results),
+        search_depth=hitl_data.get("search_depth", "basic"),
+        search_latency_ms=hitl_data.get("search_latency_ms", 0.0),
+        reason_for_web_search=hitl_data.get("reason", ""),
+        requires_approval=True,
         message="Review these web search results before generation"
     )
 
