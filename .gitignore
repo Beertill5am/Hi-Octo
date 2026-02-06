@@ -5,3 +5,4 @@ agent_knowledge_db/
 books/
 images/
 .env
+backend/data/

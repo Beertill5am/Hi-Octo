@@ -2,26 +2,34 @@ import { ChatInput } from "@/components/custom/ChatInput";
 import { ChatHistory } from "@/components/custom/ChatHistory";
 import { AgentStatus } from "@/components/custom/AgentStatus";
 import { HITLModal } from "@/components/custom/HITLModal";
+import { ThemeToggle } from "@/components/custom/ThemeToggle";
+import Link from "next/link";
 
 export default function Home() {
   return (
     <div className="flex min-h-screen flex-col bg-background">
       {/* Header */}
-      <header className="border-b border-border p-4">
-        <div className="max-w-4xl mx-auto flex items-center justify-between">
+      <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-sm">
+        <div className="max-w-4xl mx-auto flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-3">
-            <span className="text-2xl">🤖</span>
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 text-white font-bold text-lg shadow-lg">
+              🐙
+            </div>
             <div>
-              <h1 className="text-lg font-semibold">Agentic RAG</h1>
+              <h1 className="text-xl font-bold tracking-tight">Hi Octo</h1>
               <p className="text-xs text-muted-foreground">
-                Python Knowledge Assistant
+                Your Knowledge Assistant
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">
-              Powered by LangGraph
-            </span>
+          <div className="flex items-center gap-3">
+            <Link 
+              href="/manage" 
+              className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Manage Content
+            </Link>
+            <ThemeToggle />
           </div>
         </div>
       </header>

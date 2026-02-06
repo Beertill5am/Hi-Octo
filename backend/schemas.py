@@ -32,6 +32,50 @@ class HITLDecision(BaseModel):
     approved: bool = Field(..., description="Whether user approved")
     feedback: Optional[str] = Field(None, description="Optional user feedback")
 
+class CategoryCreateRequest(BaseModel):
+    name: str = Field(..., description="Category name")
+    description: Optional[str] = Field(None, description="Optional category description")
+
+
+class CategoryResponse(BaseModel):
+    name: str
+    description: Optional[str] = None
+    resource_count: int = 0
+
+
+class ResourceMetadata(BaseModel):
+    title: Optional[str] = None
+    author: Optional[str] = None
+    published_date: Optional[str] = None
+    source_url: Optional[str] = None
+    subject: Optional[str] = None
+    topic: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class ResourceResponse(ResourceMetadata):
+    id: str
+    filename: str
+    original_name: Optional[str] = None
+    category: str
+    source_type: str
+    file_path: Optional[str] = None
+    file_size: Optional[int] = None
+    file_hash: Optional[str] = None
+    chunk_count: Optional[int] = None
+    status: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class WebImportRequest(ResourceMetadata):
+    url: str = Field(..., description="URL to import")
+    category: str = Field(..., description="Category to assign")
+
+
+class ResourceUpdateRequest(ResourceMetadata):
+    category: Optional[str] = None
+    status: Optional[str] = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESPONSE MODELS

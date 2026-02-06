@@ -22,6 +22,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .routes import pipeline, hitl
+from .routes import content, categories
+from .db import init_db
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # APP CONFIGURATION
@@ -51,6 +53,8 @@ app.add_middleware(
 
 app.include_router(pipeline.router)
 app.include_router(hitl.router)
+app.include_router(content.router)
+app.include_router(categories.router)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -81,6 +85,7 @@ async def health_check():
 
 @app.on_event("startup")
 async def startup():
+    init_db()
     print("🚀 Agentic RAG API starting...")
     print("📚 Pipeline will be initialized on first request")
 

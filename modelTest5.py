@@ -1777,6 +1777,10 @@ __all__ = [
     "get_available_categories",
     "set_vectorstore",
     "SOURCE_FILES",
+    "DB_PATH",
+    # Document Processing
+    "router",
+    "intelligent_chunking",
     # Nodes (for custom pipelines)
     "dispatcher_node",
     "expand_query_node",
