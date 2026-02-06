@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+agent_knowledge_db/
+books/
+images/
+.env
