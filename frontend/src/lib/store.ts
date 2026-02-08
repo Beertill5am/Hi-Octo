@@ -2,7 +2,7 @@
  * Zustand store for pipeline state management
  */
 import { create } from "zustand";
-import { SSEEvent, HITLPendingData } from "./api";
+import { SSEEvent, HITLPendingData, RunMode } from "./api";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -24,6 +24,10 @@ export interface Message {
   quickReplyData?: {
     query: string;
     resourceCount: number;
+    modes?: RunMode[];
+    headerTitle?: string;
+    headerDescription?: string;
+    showHeader?: boolean;
   };
   isNew?: boolean;
   // For inline web search results
@@ -43,6 +47,11 @@ export interface Message {
     search_latency_ms: number;
   };
   showReportOption?: boolean;
+  // For error recovery quick actions
+  recoveryData?: {
+    query: string;
+    modes: RunMode[];
+  };
 }
 
 export interface AgentNode {
@@ -69,6 +78,11 @@ interface PipelineStore {
   status: PipelineStatus;
   currentNode: string | null;
   nodes: AgentNode[];
+  currentQuery: string | null;
+  
+  // Latency tracking
+  jobStartedAt: number | null;
+  lastLatencyMs: number | null;
   
   // Messages
   messages: Message[];
@@ -92,7 +106,7 @@ interface PipelineStore {
     options?: { skipUserMessage?: boolean }
   ) => void;
   handleSSEEvent: (event: SSEEvent) => void;
-  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption'>>) => void;
+  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption' | 'recoveryData'>>) => void;
   setHITLData: (data: HITLPendingData) => void;
   closeHITLModal: () => void;
   openSourcePicker: (data: SourcePickerData) => void;
@@ -105,6 +119,9 @@ const initialState = {
   status: "idle" as PipelineStatus,
   currentNode: null,
   nodes: [],
+  currentQuery: null,
+  jobStartedAt: null,
+  lastLatencyMs: null,
   messages: [],
   hitlData: null,
   showHITLModal: false,
@@ -123,6 +140,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       status: "running",
       currentNode: null,
       nodes: [],
+      currentQuery: topic,
+      jobStartedAt: Date.now(),
+      lastLatencyMs: null,
       hitlData: null,
       showHITLModal: false,
       showSourcePicker: false,
@@ -182,24 +202,33 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         });
         break;
         
-      case "complete":
+      case "complete": {
+        const startedAt = get().jobStartedAt;
+        const elapsed = startedAt ? Date.now() - startedAt : null;
         set({
           status: "completed",
           answer: data.answer as string,
+          lastLatencyMs: elapsed,
         });
         // Only add message if web_results didn't already add one
         if (!data.show_report_option) {
           get().addMessage("assistant", data.answer as string, { isNew: true });
         }
         break;
+      }
         
-      case "error":
+      case "error": {
+        const query = get().currentQuery;
         set({
           status: "failed",
           error: data.error as string,
         });
-        get().addMessage("system", `❌ Error: ${data.error}`);
+        // Add error with recovery quick actions
+        get().addMessage("system", `❌ Error: ${data.error}`, {
+          recoveryData: query ? { query, modes: ["llm", "web"] as RunMode[] } : undefined,
+        });
         break;
+      }
         
       case "status_change":
         set({ status: data.status as PipelineStatus });
@@ -221,6 +250,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           quickReplyData: options?.quickReplyData,
           webResults: options?.webResults,
           showReportOption: options?.showReportOption,
+          recoveryData: options?.recoveryData,
         },
       ],
     }));

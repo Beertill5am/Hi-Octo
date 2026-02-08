@@ -38,6 +38,10 @@ class PipelineRunRequest(BaseModel):
 class IntentRequest(BaseModel):
     """Request to classify user intent before running pipeline."""
     query: str = Field(..., description="Raw user input")
+    context: Optional[List[str]] = Field(
+        None,
+        description="Recent conversation context as short role-prefixed lines"
+    )
 
 
 class IntentResponse(BaseModel):

@@ -134,6 +134,21 @@ function MessageBubble({ message }: { message: Message }) {
           <QuickReplies
             query={message.quickReplyData.query}
             resourceCount={message.quickReplyData.resourceCount}
+            modes={message.quickReplyData.modes}
+            showHeader={message.quickReplyData.showHeader}
+            headerTitle={message.quickReplyData.headerTitle}
+            headerDescription={message.quickReplyData.headerDescription}
+          />
+        )}
+
+        {/* Error recovery quick retries */}
+        {message.recoveryData && (
+          <QuickReplies
+            query={message.recoveryData.query}
+            modes={message.recoveryData.modes}
+            showHeader
+            headerTitle="Quick retry"
+            headerDescription="Retry with an alternate source without retyping your question."
           />
         )}
       </div>

@@ -4,7 +4,7 @@ Pipeline Routes - /pipeline/* endpoints
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 import json
-
+from langchain_ollama import ChatOllama
 from ..schemas import (
     PipelineRunRequest,
     PipelineRunResponse,
@@ -15,7 +15,7 @@ from ..schemas import (
 )
 from ..db import CategoryRepository, ResourceRepository
 from ..pipeline_runner import runner
-from langchain_ollama import ChatOllama
+from ..content_manager import get_vectorstore
 
 router = APIRouter(prefix="/pipeline", tags=["Pipeline"])
 category_repo = CategoryRepository()
@@ -46,7 +46,6 @@ async def run_pipeline(request: PipelineRunRequest):
 
 def _summarize_resources():
     """Get actual document counts and sample titles from vectorstore."""
-    from ..content_manager import get_vectorstore
     
     try:
         vectorstore = get_vectorstore()
@@ -104,7 +103,13 @@ def _summarize_resources():
         }
 
 
-def _classify_intent(query: str, resource_count: int = 0, category_summary: str = "", doc_examples: str = "") -> dict:
+def _classify_intent(
+    query: str,
+    resource_count: int = 0,
+    category_summary: str = "",
+    doc_examples: str = "",
+    context: list[str] | None = None,
+) -> dict:
     """Use LLM to classify intent and generate dynamic responses."""
     normalized = (query or "").strip()
     if not normalized or len(normalized) <= 2:
@@ -120,6 +125,12 @@ def _classify_intent(query: str, resource_count: int = 0, category_summary: str 
     
     # Use LLM for intent classification
     llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.7, num_ctx=64000)
+
+    context_lines = context or []
+    context_block = ""
+    if context_lines:
+        context_text = "\n".join(context_lines[-15:])
+        context_block = f"\nConversation so far (most recent last):\n{context_text}\n"
     
     classification_prompt = f"""Classify this user message into exactly ONE category:
 - GREETING: greetings, introductions, "who are you", "what can you do", "tell me about yourself", "help"
@@ -127,7 +138,7 @@ def _classify_intent(query: str, resource_count: int = 0, category_summary: str 
 - UNCLEAR: gibberish, typos, nonsensical, too vague to understand
 
 User message: "{normalized}"
-
+{context_block}
 Respond with ONLY the category name (GREETING, KNOWLEDGE, or UNCLEAR), nothing else."""
 
     try:
@@ -152,9 +163,10 @@ Respond with ONLY the category name (GREETING, KNOWLEDGE, or UNCLEAR), nothing e
         else:
             kb_desc = "your knowledge base (empty for now)"
         
-        greeting_prompt = f"""You are Octo, a friendly knowledge assistant. The user said: "{normalized}"
+        greeting_prompt = f"""You are Octo, a friendly knowledge assistant.
+User message: "{normalized}"
+{context_block}
 Respond warmly in 2-3 sentences. Mention you can search {kb_desc}, answer from your built-in knowledge, or search the web. End with an invitation to ask a question. No bullet points. No thinking tags."""
-
         try:
             response = llm.invoke(greeting_prompt).content.strip()
             if "<think>" in response:
@@ -194,7 +206,13 @@ Respond warmly in 2-3 sentences. Mention you can search {kb_desc}, answer from y
 async def classify_intent(payload: IntentRequest):
     """Classify user intent before running the pipeline."""
     summary = _summarize_resources()
-    intent = _classify_intent(payload.query, summary["resource_count"], summary["category_summary"], summary["doc_examples"])
+    intent = _classify_intent(
+        payload.query,
+        summary["resource_count"],
+        summary["category_summary"],
+        summary["doc_examples"],
+        payload.context or [],
+    )
     return IntentResponse(
         action=intent["action"],
         message=intent["message"],

@@ -44,6 +44,7 @@ export default function ManagePage() {
   const [uploadCategory, setUploadCategory] = useState("");
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadAuthor, setUploadAuthor] = useState("");
+  const [uploadFileName, setUploadFileName] = useState("");
   const [importUrl, setImportUrl] = useState("");
   const [importCategory, setImportCategory] = useState("");
   const [importTitle, setImportTitle] = useState("");
@@ -106,7 +107,8 @@ export default function ManagePage() {
       });
       setUploadTitle("");
       setUploadAuthor("");
-      (e.target as HTMLFormElement).reset();
+      setUploadFileName("");
+      setUploadCategory(""); // Reset category to default
       await loadData();
       showSuccess("File uploaded successfully!");
     } catch (err) {
@@ -316,6 +318,8 @@ export default function ManagePage() {
                       <input
                         type="file"
                         name="file"
+                        value={uploadFileName}
+                        onChange={(e) => setUploadFileName(e.target.value)}
                         accept=".md,.epub,.txt,.pdf"
                         className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm file:mr-4 file:rounded-md file:border-0 file:bg-primary file:px-4 file:py-2 file:text-sm file:text-primary-foreground hover:file:bg-primary/90"
                       />

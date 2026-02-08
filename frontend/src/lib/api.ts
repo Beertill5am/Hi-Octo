@@ -25,6 +25,11 @@ export interface IntentResponse {
   categories: string[];
 }
 
+export interface IntentRequest {
+  query: string;
+  context?: string[];
+}
+
 export interface SearchResult {
   title: string;
   url: string;
@@ -102,11 +107,16 @@ export async function startPipeline(
 /**
  * Classify intent before running the pipeline
  */
-export async function getIntent(query: string): Promise<IntentResponse> {
+export async function getIntent(query: string, context?: string[]): Promise<IntentResponse> {
+  const payload: IntentRequest = { query };
+  if (context && context.length > 0) {
+    payload.context = context;
+  }
+
   const response = await fetch(`${API_BASE}/pipeline/intent`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
