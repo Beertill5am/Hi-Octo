@@ -18,7 +18,7 @@ from datetime import datetime
 import pypandoc
 from ebooklib import epub
 from markdownify import markdownify as md
-from typing import Protocol, Type, TypedDict, List, Dict, Any, Annotated, Union
+from typing import Protocol, Type, TypedDict, List, Dict, Any, Annotated, Union, Optional, Callable
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_ollama import ChatOllama
@@ -74,6 +74,13 @@ SOURCE_FILES = ["books/think_python_how_to_think_like_a_computer_scientist.epub"
 
 
 def display_model_thoughts(thought_content):
+    if os.environ.get("OCTO_ENABLE_NOTEBOOK_UI", "").strip() != "1":
+        return
+    try:
+        from IPython import get_ipython
+        if not get_ipython(): return
+    except: return
+
     # Convert markdown to HTML
     html_content = markdown.markdown(thought_content, extensions=['extra', 'fenced_code'])
 
@@ -739,6 +746,7 @@ def build_retriever(file_paths: List[str], category: str, force_skip_refinement:
 
 class AgentState(TypedDict):
     topic: str
+    job_id: str
     queries: List[str]
     documents: Annotated[List[Document], operator.add]
     is_relevant: bool
@@ -760,6 +768,77 @@ class AgentState(TypedDict):
     # HITL state
     hitl_approved: bool
     hitl_message: str
+    # Query-plan HITL state
+    query_plan_approved: bool
+    query_plan_message: str
+    query_plan_rejection_reason: str
+
+
+def _chunk_to_text(chunk: Any) -> str:
+    """Normalize LLM stream chunk content into plain text."""
+    content = getattr(chunk, "content", chunk)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                txt = item.get("text")
+                if isinstance(txt, str):
+                    parts.append(txt)
+            else:
+                txt = getattr(item, "text", "")
+                if isinstance(txt, str):
+                    parts.append(txt)
+        return "".join(parts)
+    return str(content) if content is not None else ""
+
+
+def _stream_writer_answer(llm_writer: ChatOllama, instruction: str, job_id: str) -> str:
+    """
+    Stream writer tokens through backend callback when available.
+    Falls back to invoke() when stream is unavailable.
+    """
+    if answer_token_stream_handler is None:
+        response = llm_writer.invoke(instruction)
+        return response.content if response else ""
+
+    final_parts: List[str] = []
+    try:
+        for chunk in llm_writer.stream(instruction):
+            token = _chunk_to_text(chunk)
+            if not token:
+                continue
+            final_parts.append(token)
+            answer_token_stream_handler(
+                job_id=job_id,
+                token=token,
+                done=False,
+                final_text=""
+            )
+    except Exception:
+        # Fallback to single-shot generation if streaming fails
+        response = llm_writer.invoke(instruction)
+        fallback = response.content if response else ""
+        if fallback:
+            final_parts.append(fallback)
+            answer_token_stream_handler(
+                job_id=job_id,
+                token=fallback,
+                done=False,
+                final_text=""
+            )
+
+    final_answer = "".join(final_parts)
+    answer_token_stream_handler(
+        job_id=job_id,
+        token="",
+        done=True,
+        final_text=final_answer
+    )
+    return final_answer
 
 
 # In[18]:
@@ -827,6 +906,70 @@ def map_queries_node(state: AgentState):
         Send("search_worker", {"query": q, "category": category}) 
         for q in queries
     ]
+
+
+def query_plan_hitl_node(state: AgentState):
+    """
+    Query-plan checkpoint immediately after expansion.
+    Lets backend pause and request user approve/reject/edit of generated queries.
+    """
+    print("--- 👤 HITL Checkpoint: Query Plan Review ---")
+
+    queries = state.get("queries", [])
+    if not queries:
+        return {
+            "query_plan_approved": True,
+            "query_plan_message": "No expanded queries available.",
+            "query_plan_rejection_reason": ""
+        }
+
+    if query_plan_hitl_handler is None:
+        print("   ⚠️ No query-plan HITL handler configured. Auto-approving.")
+        return {
+            "query_plan_approved": True,
+            "query_plan_message": "Auto-approved (no query-plan HITL handler).",
+            "query_plan_rejection_reason": ""
+        }
+
+    decision = query_plan_hitl_handler(
+        job_id=state.get("job_id", ""),
+        topic=state.get("topic", ""),
+        selected_category=state.get("selected_category", ""),
+        queries=queries
+    ) or {}
+
+    approved = bool(decision.get("approved", True))
+    edited_queries = decision.get("queries", queries) or queries
+    reason = str(decision.get("reason", ""))
+
+    if approved:
+        print(f"   ✅ Query plan approved with {len(edited_queries)} queries.")
+        return {
+            "queries": edited_queries,
+            "query_plan_approved": True,
+            "query_plan_message": "Query plan approved.",
+            "query_plan_rejection_reason": ""
+        }
+
+    print("   ❌ Query plan rejected by user.")
+    return {
+        "query_plan_approved": False,
+        "query_plan_message": "Query plan rejected.",
+        "query_plan_rejection_reason": reason,
+        "answer": "Query plan rejected by user before retrieval."
+    }
+
+
+def route_from_query_plan_hitl(state: AgentState) -> str:
+    """Route after query-plan HITL decision."""
+    if state.get("query_plan_approved", False):
+        return "query_fanout"
+    return "end_node"
+
+
+def query_fanout_node(state: AgentState):
+    """No-op node to attach dynamic fanout mapping after query-plan HITL."""
+    return {}
 
 
 # In[21]:
@@ -1247,7 +1390,11 @@ def generate_answer_node(state: AgentState):
         """
 
     # --- Execution ---
-    final_answer = llm_writer.invoke(instruction).content
+    final_answer = _stream_writer_answer(
+        llm_writer,
+        instruction,
+        state.get("job_id", "")
+    )
     display_model_thoughts(final_answer)
 
     # Return updated state
@@ -1604,14 +1751,25 @@ def code_tester_node(state: AgentState):
     logs = []
     failed_fixes = 0
     MAX_FIX_FAILURES = 3  # Don't let fixing loops run forever
+    MAX_BLOCKS_TO_TEST = 4
+    MAX_CODE_CHARS = 5000
 
     # Iterate in reverse order to replace text without messing up indices
-    for match in reversed(matches):
+    for idx, match in enumerate(reversed(matches)):
         try:
+            if idx >= MAX_BLOCKS_TO_TEST:
+                logs.append(f"Skipped remaining blocks after {MAX_BLOCKS_TO_TEST} checks (resource guard).")
+                break
+
             code_block = match.group(1).strip()
+            if len(code_block) > MAX_CODE_CHARS:
+                logs.append(
+                    f"Skipped oversized code block ({len(code_block)} chars > {MAX_CODE_CHARS} char limit)."
+                )
+                continue
 
             # 1. Execute with safe wrapper
-            output = safe_code_execution(sandbox, code_block)
+            output = safe_code_execution(sandbox, code_block, timeout_seconds=5.0)
 
             # 2. Check if we should attempt a fix
             if should_attempt_fix(output, failed_fixes, MAX_FIX_FAILURES):
@@ -1689,6 +1847,8 @@ web_search_node = create_web_search_node()
 workflow.add_node("guardrail", traceable(guardrail_node))  # Safety filter
 workflow.add_node("dispatcher", traceable(dispatcher_node))
 workflow.add_node("expander", traceable(expand_query_node))
+workflow.add_node("query_plan_hitl", traceable(query_plan_hitl_node))
+workflow.add_node("query_fanout", traceable(query_fanout_node))
 workflow.add_node("search_worker", traceable(search_worker_node))
 workflow.add_node("deduplicator", traceable(deduplicate_node))
 workflow.add_node("grader", traceable(grade_documents_node))
@@ -1711,7 +1871,12 @@ workflow.add_conditional_edges("guardrail", route_from_guardrail, {
 
 # Routing
 workflow.add_conditional_edges("dispatcher", route_from_dispatcher, {"expander": "expander", "end_node": END})
-workflow.add_conditional_edges("expander", map_queries_node, ["search_worker"])
+workflow.add_edge("expander", "query_plan_hitl")
+workflow.add_conditional_edges("query_plan_hitl", route_from_query_plan_hitl, {
+    "query_fanout": "query_fanout",
+    "end_node": END
+})
+workflow.add_conditional_edges("query_fanout", map_queries_node, ["search_worker"])
 
 # Retrieval Loop
 workflow.add_edge("search_worker", "deduplicator")
@@ -1752,6 +1917,8 @@ app = workflow.compile()
 
 # Global vectorstore instance - set by backend before running pipeline
 vectorstore = None
+query_plan_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
+answer_token_stream_handler: Optional[Callable[..., None]] = None
 
 def set_vectorstore(vs):
     """
@@ -1761,6 +1928,26 @@ def set_vectorstore(vs):
     global vectorstore
     vectorstore = vs
     print(f"✅ Global vectorstore initialized")
+
+
+def set_query_plan_hitl_handler(handler: Optional[Callable[..., Dict[str, Any]]]):
+    """
+    Set callback for query-plan HITL decisions.
+    Expected callback result:
+      {"approved": bool, "queries": List[str], "reason": str}
+    """
+    global query_plan_hitl_handler
+    query_plan_hitl_handler = handler
+
+
+def set_answer_token_stream_handler(handler: Optional[Callable[..., None]]):
+    """
+    Set callback to stream writer tokens to backend runner.
+    Callback kwargs:
+      job_id: str, token: str, done: bool, final_text: str
+    """
+    global answer_token_stream_handler
+    answer_token_stream_handler = handler
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1776,6 +1963,8 @@ __all__ = [
     "build_retriever",
     "get_available_categories",
     "set_vectorstore",
+    "set_query_plan_hitl_handler",
+    "set_answer_token_stream_handler",
     "SOURCE_FILES",
     "DB_PATH",
     # Document Processing
@@ -1784,6 +1973,7 @@ __all__ = [
     # Nodes (for custom pipelines)
     "dispatcher_node",
     "expand_query_node",
+    "query_plan_hitl_node",
     "search_worker_node",
     "deduplicate_node",
     "grade_documents_node",
@@ -1793,6 +1983,7 @@ __all__ = [
     "hitl_approval_node",
     # Routing
     "route_from_dispatcher",
+    "route_from_query_plan_hitl",
     "route_from_grader_with_web",
     "route_from_critic",
     "route_from_guardrail",

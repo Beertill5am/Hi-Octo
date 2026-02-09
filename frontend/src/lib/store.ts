@@ -2,7 +2,11 @@
  * Zustand store for pipeline state management
  */
 import { create } from "zustand";
-import { SSEEvent, HITLPendingData, RunMode } from "./api";
+import { SSEEvent, HITLPendingData, QueryPlanPendingData, RunMode } from "./api";
+
+if (typeof window !== "undefined") {
+  window.localStorage.removeItem("octo-pipeline-store");
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -20,6 +24,8 @@ export interface Message {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: Date;
+  runId?: string;
+  isActionable?: boolean;
   showQuickReplies?: boolean;
   quickReplyData?: {
     query: string;
@@ -67,6 +73,13 @@ export interface SourcePickerData {
   categories: string[];
 }
 
+export interface ReasoningLogEntry {
+  stage: string;
+  text: string;
+  seq: number;
+  done: boolean;
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STORE
@@ -75,6 +88,7 @@ export interface SourcePickerData {
 interface PipelineStore {
   // Pipeline state
   jobId: string | null;
+  activeRunId: string | null;
   status: PipelineStatus;
   currentNode: string | null;
   nodes: AgentNode[];
@@ -86,10 +100,18 @@ interface PipelineStore {
   
   // Messages
   messages: Message[];
+  messageActionableMap: Record<string, string>;
+  resolvedActionMessages: Record<string, boolean>;
+  liveReasoning: ReasoningLogEntry[];
+  reasoningDone: boolean;
+  streamingAnswer: string;
+  answerStreaming: boolean;
   
   // HITL
   hitlData: HITLPendingData | null;
   showHITLModal: boolean;
+  queryPlanData: QueryPlanPendingData | null;
+  showQueryPlanModal: boolean;
 
   // Source selection
   showSourcePicker: boolean;
@@ -106,9 +128,11 @@ interface PipelineStore {
     options?: { skipUserMessage?: boolean }
   ) => void;
   handleSSEEvent: (event: SSEEvent) => void;
-  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption' | 'recoveryData'>>) => void;
+  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption' | 'recoveryData' | 'runId'>>) => void;
+  markActionMessageResolved: (messageId: string) => void;
   setHITLData: (data: HITLPendingData) => void;
   closeHITLModal: () => void;
+  closeQueryPlanModal: () => void;
   openSourcePicker: (data: SourcePickerData) => void;
   closeSourcePicker: () => void;
   reset: () => void;
@@ -116,6 +140,7 @@ interface PipelineStore {
 
 const initialState = {
   jobId: null,
+  activeRunId: null,
   status: "idle" as PipelineStatus,
   currentNode: null,
   nodes: [],
@@ -123,8 +148,16 @@ const initialState = {
   jobStartedAt: null,
   lastLatencyMs: null,
   messages: [],
+  messageActionableMap: {},
+  resolvedActionMessages: {},
+  liveReasoning: [],
+  reasoningDone: false,
+  streamingAnswer: "",
+  answerStreaming: false,
   hitlData: null,
   showHITLModal: false,
+  queryPlanData: null,
+  showQueryPlanModal: false,
   showSourcePicker: false,
   sourcePickerData: null,
   answer: null,
@@ -137,6 +170,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   startJob: (jobId: string, topic: string, options) => {
     set({
       jobId,
+      activeRunId: jobId,
       status: "running",
       currentNode: null,
       nodes: [],
@@ -145,15 +179,23 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       lastLatencyMs: null,
       hitlData: null,
       showHITLModal: false,
+      queryPlanData: null,
+      showQueryPlanModal: false,
       showSourcePicker: false,
       sourcePickerData: null,
       answer: null,
       error: null,
+      messageActionableMap: {},
+      resolvedActionMessages: {},
+      liveReasoning: [],
+      reasoningDone: false,
+      streamingAnswer: "",
+      answerStreaming: false,
     });
     
     // Add user message
     if (!options?.skipUserMessage) {
-      get().addMessage("user", topic);
+      get().addMessage("user", topic, { runId: jobId });
     }
     get().addMessage("system", "🚀 Pipeline started...");
   },
@@ -162,9 +204,18 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     const { event: eventType, data } = event;
     
     switch (eventType) {
+      case "pipeline_start":
+        set({
+          activeRunId: String(data.job_id || get().activeRunId || ""),
+          jobStartedAt: data.started_at ? Date.parse(String(data.started_at)) : Date.now(),
+        });
+        break;
+
       case "node_start":
         set((state) => ({
           currentNode: data.node as string,
+          streamingAnswer: data.node === "generate" ? "" : state.streamingAnswer,
+          answerStreaming: data.node === "generate" ? true : state.answerStreaming,
           nodes: [...state.nodes, {
             name: data.node as string,
             status: "running",
@@ -191,6 +242,45 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         });
         get().addMessage("system", "⏸️ Waiting for your approval on web search results...");
         break;
+
+      case "query_plan_pending":
+        set({
+          status: "hitl_waiting",
+          queryPlanData: data as unknown as QueryPlanPendingData,
+          showQueryPlanModal: true,
+        });
+        get().addMessage("system", "⏸️ Review generated search queries before retrieval.");
+        break;
+
+      case "query_plan_approved":
+        set({
+          status: "running",
+          showQueryPlanModal: false,
+        });
+        get().addMessage("system", "✅ Query plan approved. Starting retrieval.");
+        break;
+
+      case "query_plan_rejected":
+        set({
+          status: "failed",
+          showQueryPlanModal: false,
+          answerStreaming: false,
+        });
+        get().addMessage("system", `❌ Query plan rejected: ${String(data.reason || "User rejected")}`);
+        break;
+
+      case "answer_token":
+        set((state) => ({
+          answerStreaming: true,
+          streamingAnswer: `${state.streamingAnswer}${String(data.token || "")}`,
+        }));
+        break;
+
+      case "answer_done":
+        set({
+          answerStreaming: false,
+        });
+        break;
         
       case "web_results":
         // Display web search results inline in chat
@@ -201,18 +291,42 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           showReportOption: true,
         });
         break;
+
+      case "reasoning_chunk":
+        set((state) => ({
+          liveReasoning: [
+            ...state.liveReasoning,
+            {
+              stage: String(data.stage || "pipeline"),
+              text: String(data.text || ""),
+              seq: Number(data.seq || state.liveReasoning.length + 1),
+              done: false,
+            },
+          ].slice(-25),
+        }));
+        break;
+
+      case "reasoning_done":
+        set((state) => ({
+          reasoningDone: true,
+          liveReasoning: state.liveReasoning.map((entry) => ({ ...entry, done: true })),
+        }));
+        break;
         
       case "complete": {
         const startedAt = get().jobStartedAt;
         const elapsed = startedAt ? Date.now() - startedAt : null;
+        const streamed = get().streamingAnswer;
         set({
           status: "completed",
           answer: data.answer as string,
           lastLatencyMs: elapsed,
+          reasoningDone: true,
+          answerStreaming: false,
         });
         // Only add message if web_results didn't already add one
-        if (!data.show_report_option) {
-          get().addMessage("assistant", data.answer as string, { isNew: true });
+        if (!data.show_report_option && !streamed) {
+          get().addMessage("assistant", (data.answer as string) || streamed, { isNew: false });
         }
         break;
       }
@@ -222,10 +336,13 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         set({
           status: "failed",
           error: data.error as string,
+          reasoningDone: true,
+          answerStreaming: false,
         });
         // Add error with recovery quick actions
         get().addMessage("system", `❌ Error: ${data.error}`, {
           recoveryData: query ? { query, modes: ["llm", "web"] as RunMode[] } : undefined,
+          runId: get().jobId || undefined,
         });
         break;
       }
@@ -233,26 +350,49 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       case "status_change":
         set({ status: data.status as PipelineStatus });
         break;
+
+      case "cancelled":
+        set({ status: "failed", reasoningDone: true, answerStreaming: false });
+        get().addMessage("system", `⛔ Cancelled: ${String(data.reason || "Pipeline cancelled")}`);
+        break;
     }
   },
   
   addMessage: (role, content, options) => {
+    set((state) => {
+      const isActionable = Boolean(options?.showQuickReplies || options?.recoveryData);
+      const runId = options?.runId || state.activeRunId || state.jobId || undefined;
+      const message: Message = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        role,
+        content,
+        timestamp: new Date(),
+        isActionable,
+        isNew: options?.isNew,
+        showQuickReplies: options?.showQuickReplies,
+        quickReplyData: options?.quickReplyData,
+        webResults: options?.webResults,
+        showReportOption: options?.showReportOption,
+        recoveryData: options?.recoveryData,
+        runId,
+      };
+
+      return {
+        messages: [...state.messages, message],
+        messageActionableMap:
+          isActionable && runId
+            ? { ...state.messageActionableMap, [message.id]: runId }
+            : state.messageActionableMap,
+      };
+    });
+  },
+
+  markActionMessageResolved: (messageId: string) => {
     set((state) => ({
-      messages: [
-        ...state.messages,
-        {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          role,
-          content,
-          timestamp: new Date(),
-          isNew: options?.isNew,
-          showQuickReplies: options?.showQuickReplies,
-          quickReplyData: options?.quickReplyData,
-          webResults: options?.webResults,
-          showReportOption: options?.showReportOption,
-          recoveryData: options?.recoveryData,
-        },
-      ],
+      resolvedActionMessages: {
+        ...state.resolvedActionMessages,
+        [messageId]: true,
+      },
     }));
   },
   
@@ -262,6 +402,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   
   closeHITLModal: () => {
     set({ showHITLModal: false });
+  },
+
+  closeQueryPlanModal: () => {
+    set({ showQueryPlanModal: false });
   },
 
   openSourcePicker: (data) => {

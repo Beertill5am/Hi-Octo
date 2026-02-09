@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import threading
 from typing import Protocol, Type, Dict, List, Any, Callable, TypeVar
 from pydantic import BaseModel
 from docx import Document as DocxDocument
@@ -294,7 +295,8 @@ def safe_llm_invoke(
     prompt,
     max_retries: int = 3,
     fallback_value: Any = None,
-    operation_name: str = "LLM Call"
+    operation_name: str = "LLM Call",
+    timeout_seconds: float = 45.0
 ) -> Any:
     """
     Pattern: Graceful Degradation
@@ -314,7 +316,23 @@ def safe_llm_invoke(
     
     for attempt in range(max_retries):
         try:
-            return llm.invoke(prompt)
+            response_holder: Dict[str, Any] = {"response": None, "error": None}
+
+            def _invoke():
+                try:
+                    response_holder["response"] = llm.invoke(prompt)
+                except Exception as exc:
+                    response_holder["error"] = exc
+
+            worker = threading.Thread(target=_invoke, daemon=True)
+            worker.start()
+            worker.join(timeout=timeout_seconds)
+
+            if worker.is_alive():
+                raise TimeoutError(f"{operation_name} timed out after {timeout_seconds}s")
+            if response_holder["error"] is not None:
+                raise response_holder["error"]
+            return response_holder["response"]
         except Exception as e:
             last_error = e
             wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
@@ -424,7 +442,12 @@ def create_fallback_response(content: str = "Fallback: Analysis unavailable.") -
 # SECTION 4: ENHANCED NODE WRAPPERS
 # =============================================================================
 
-def safe_code_execution(sandbox, code: str, max_output_len: int = 1000) -> str:
+def safe_code_execution(
+    sandbox,
+    code: str,
+    max_output_len: int = 1000,
+    timeout_seconds: float = 5.0
+) -> str:
     """
     Safely execute code with output truncation.
     
@@ -437,7 +460,24 @@ def safe_code_execution(sandbox, code: str, max_output_len: int = 1000) -> str:
         Execution output (possibly truncated)
     """
     try:
-        output = sandbox.execute(code)
+        output_holder: Dict[str, Any] = {"output": None, "error": None}
+
+        def _run():
+            try:
+                output_holder["output"] = sandbox.execute(code)
+            except Exception as exc:
+                output_holder["error"] = exc
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join(timeout=timeout_seconds)
+
+        if worker.is_alive():
+            return f"ERROR: Execution timed out after {timeout_seconds}s"
+        if output_holder["error"] is not None:
+            raise output_holder["error"]
+
+        output = output_holder["output"] or ""
         
         # Truncate very long outputs
         if len(output) > max_output_len:

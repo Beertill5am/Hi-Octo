@@ -1,7 +1,7 @@
 """
 Pipeline Routes - /pipeline/* endpoints
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 import json
 from langchain_ollama import ChatOllama
@@ -11,7 +11,9 @@ from ..schemas import (
     PipelineResultResponse,
     IntentRequest,
     IntentResponse,
-    JobStatus
+    JobStatus,
+    QueryPlanDecision,
+    QueryPlanPendingData
 )
 from ..db import CategoryRepository, ResourceRepository
 from ..pipeline_runner import runner
@@ -224,7 +226,7 @@ async def classify_intent(payload: IntentRequest):
 
 
 @router.get("/status/{job_id}")
-async def stream_status(job_id: str):
+async def stream_status(job_id: str, last_seq: int = Query(default=0, ge=0)):
     """
     SSE endpoint for real-time pipeline status updates.
     Connect to this to receive events as pipeline progresses.
@@ -234,8 +236,9 @@ async def stream_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     
     async def event_generator():
-        async for event in runner.stream_events(job_id):
+        async for event in runner.stream_events(job_id, last_seq=last_seq):
             yield {
+                "id": str(event.get("seq", "")),
                 "event": event.get("event", "message"),
                 "data": json.dumps(event.get("data", {}))
             }
@@ -260,6 +263,93 @@ async def get_result(job_id: str):
         error=job.error,
         trace=job.trace
     )
+
+
+@router.get("/query-plan/pending/{job_id}", response_model=QueryPlanPendingData)
+async def get_pending_query_plan(job_id: str):
+    """Get pending query-plan HITL data."""
+    job = runner.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.status != JobStatus.HITL_WAITING or not job.query_plan_data:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is not waiting on query-plan approval. Status: {job.status.value}"
+        )
+
+    data = job.query_plan_data
+    return QueryPlanPendingData(
+        job_id=job_id,
+        original_query=data.get("original_query", data.get("query", job.topic)),
+        query=data.get("query", job.topic),
+        selected_category=data.get("selected_category", ""),
+        queries=data.get("queries", []),
+        can_edit=bool(data.get("can_edit", True)),
+        requires_approval=True,
+        message=data.get("message", "Review generated search queries before retrieval")
+    )
+
+
+@router.post("/query-plan/approve/{job_id}")
+async def approve_query_plan(job_id: str, decision: QueryPlanDecision):
+    """Approve (and optionally edit) query-plan checkpoint."""
+    success = await runner.approve_query_plan(
+        job_id,
+        edited_queries=decision.edited_queries,
+        feedback=decision.feedback
+    )
+    if not success:
+        job = runner.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot approve query plan for job status: {job.status.value}"
+        )
+
+    return {"job_id": job_id, "status": "approved", "message": "Query plan approved"}
+
+
+@router.post("/query-plan/reject/{job_id}")
+async def reject_query_plan(job_id: str, decision: QueryPlanDecision):
+    """Reject query-plan checkpoint and stop retrieval."""
+    reason = decision.feedback if decision else "User rejected query plan"
+    success = await runner.reject_query_plan(job_id, reason=reason)
+    if not success:
+        job = runner.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot reject query plan for job status: {job.status.value}"
+        )
+
+    return {"job_id": job_id, "status": "rejected", "message": "Query plan rejected"}
+
+
+@router.post("/cancel/{job_id}")
+async def cancel_pipeline(job_id: str):
+    """Cancel an active pipeline run."""
+    success = await runner.cancel_job(job_id)
+    if not success:
+        job = runner.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=400, detail=f"Cannot cancel job in status: {job.status.value}")
+    return {"job_id": job_id, "status": "cancelled"}
+
+
+@router.post("/resume/{job_id}")
+async def resume_pipeline(job_id: str):
+    """Resume stream status for a paused/in-flight job."""
+    success = await runner.resume_job(job_id)
+    if not success:
+        job = runner.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=400, detail=f"Cannot resume job in status: {job.status.value}")
+    return {"job_id": job_id, "status": "running"}
 
 
 @router.get("/jobs")

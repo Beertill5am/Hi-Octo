@@ -27,6 +27,7 @@ interface WebSearchResultsInlineProps {
   totalFound: number;
   searchLatencyMs: number;
   showReportOption?: boolean;
+  disabledActions?: boolean;
   onGenerateReport?: () => void;
   onNewQuery?: () => void;
 }
@@ -140,6 +141,7 @@ export function WebSearchResultsInline({
   totalFound,
   searchLatencyMs,
   showReportOption = true,
+  disabledActions = false,
   onGenerateReport,
   onNewQuery,
 }: WebSearchResultsInlineProps) {
@@ -191,6 +193,7 @@ export function WebSearchResultsInline({
           <Button 
             size="sm" 
             onClick={onGenerateReport}
+            disabled={disabledActions}
             className="bg-violet-600 hover:bg-violet-500 text-white text-xs h-7"
           >
             <RefreshCw className="w-3 h-3 mr-1.5" />
@@ -200,6 +203,7 @@ export function WebSearchResultsInline({
             size="sm" 
             variant="outline"
             onClick={onNewQuery}
+            disabled={disabledActions}
             className="border-violet-600 text-violet-400 hover:bg-violet-950 text-xs h-7"
           >
             <MessageSquare className="w-3 h-3 mr-1.5" />

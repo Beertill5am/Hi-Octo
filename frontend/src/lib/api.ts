@@ -80,6 +80,23 @@ export interface SSEEvent {
   data: Record<string, unknown>;
 }
 
+export interface ReasoningChunk {
+  stage: string;
+  text: string;
+  seq: number;
+}
+
+export interface QueryPlanPendingData {
+  job_id: string;
+  original_query: string;
+  query: string;
+  selected_category: string;
+  queries: string[];
+  can_edit: boolean;
+  requires_approval: boolean;
+  message: string;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // API FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -135,50 +152,81 @@ export function subscribeToPipelineStatus(
   onEvent: (event: SSEEvent) => void,
   onError?: (error: Error) => void
 ): () => void {
-  const eventSource = new EventSource(`${API_BASE}/pipeline/status/${jobId}`);
-  
-  eventSource.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      onEvent({ event: "message", data });
-    } catch {
-      onEvent({ event: "message", data: { raw: event.data } });
+  let eventSource: EventSource | null = null;
+  let manuallyClosed = false;
+  let reconnectAttempts = 0;
+  let lastSeq = 0;
+
+  const terminalEvents = new Set(["cancelled", "complete", "error"]);
+
+  const parseEvent = (name: string, event: Event) => {
+    const messageEvent = event as MessageEvent;
+    const seq = Number(messageEvent.lastEventId || 0);
+    if (seq > 0) {
+      lastSeq = seq;
+    }
+    const data = JSON.parse(messageEvent.data);
+    onEvent({ event: name, data });
+    if (terminalEvents.has(name)) {
+      manuallyClosed = true;
+      eventSource?.close();
     }
   };
-  
-  eventSource.addEventListener("node_start", (event) => {
-    onEvent({ event: "node_start", data: JSON.parse((event as MessageEvent).data) });
-  });
-  
-  eventSource.addEventListener("node_end", (event) => {
-    onEvent({ event: "node_end", data: JSON.parse((event as MessageEvent).data) });
-  });
-  
-  eventSource.addEventListener("hitl_pending", (event) => {
-    onEvent({ event: "hitl_pending", data: JSON.parse((event as MessageEvent).data) });
-  });
-  
-  eventSource.addEventListener("web_results", (event) => {
-    onEvent({ event: "web_results", data: JSON.parse((event as MessageEvent).data) });
-  });
-  
-  eventSource.addEventListener("complete", (event) => {
-    onEvent({ event: "complete", data: JSON.parse((event as MessageEvent).data) });
-    eventSource.close();
-  });
-  
-  eventSource.addEventListener("error", (event) => {
-    onEvent({ event: "error", data: JSON.parse((event as MessageEvent).data) });
-    eventSource.close();
-  });
-  
-  eventSource.onerror = () => {
-    onError?.(new Error("SSE connection error"));
-    eventSource.close();
+
+  const connect = () => {
+    const suffix = lastSeq > 0 ? `?last_seq=${lastSeq}` : "";
+    eventSource = new EventSource(`${API_BASE}/pipeline/status/${jobId}${suffix}`);
+
+    eventSource.onmessage = (event) => {
+      try {
+        parseEvent("message", event);
+      } catch {
+        onEvent({ event: "message", data: { raw: event.data } });
+      }
+    };
+
+    const bind = (eventName: string) => {
+      eventSource?.addEventListener(eventName, (event) => {
+        parseEvent(eventName, event);
+      });
+    };
+
+    bind("pipeline_start");
+    bind("node_start");
+    bind("node_end");
+    bind("hitl_pending");
+    bind("web_results");
+    bind("reasoning_chunk");
+    bind("reasoning_done");
+    bind("query_plan_pending");
+    bind("query_plan_approved");
+    bind("query_plan_rejected");
+    bind("answer_token");
+    bind("answer_done");
+    bind("cancelled");
+    bind("complete");
+    bind("error");
+
+    eventSource.onerror = () => {
+      eventSource?.close();
+      if (manuallyClosed) {
+        return;
+      }
+      if (reconnectAttempts >= 5) {
+        onError?.(new Error("SSE connection error"));
+        return;
+      }
+      reconnectAttempts += 1;
+      window.setTimeout(connect, Math.min(1000 * reconnectAttempts, 4000));
+    };
   };
-  
-  // Return cleanup function
-  return () => eventSource.close();
+
+  connect();
+
+  return () => {
+    manuallyClosed = true;
+    eventSource?.close();
+  };
 }
 
 /**
@@ -234,6 +282,52 @@ export async function rejectHITL(jobId: string, reason?: string): Promise<void> 
   
   if (!response.ok) {
     throw new Error(`Failed to reject: ${response.statusText}`);
+  }
+}
+
+export async function approveQueryPlan(
+  jobId: string,
+  editedQueries?: string[],
+  feedback?: string
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/pipeline/query-plan/approve/${jobId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approved: true, edited_queries: editedQueries, feedback }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to approve query plan: ${response.statusText}`);
+  }
+}
+
+export async function rejectQueryPlan(jobId: string, reason?: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/pipeline/query-plan/reject/${jobId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approved: false, feedback: reason }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to reject query plan: ${response.statusText}`);
+  }
+}
+
+export async function cancelPipeline(jobId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/pipeline/cancel/${jobId}`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to cancel pipeline: ${response.statusText}`);
+  }
+}
+
+export async function resumePipeline(jobId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/pipeline/resume/${jobId}`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to resume pipeline: ${response.statusText}`);
   }
 }
 

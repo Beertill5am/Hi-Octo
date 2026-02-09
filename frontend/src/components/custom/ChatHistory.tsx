@@ -9,7 +9,13 @@ import { TypewriterText } from "./TypewriterText";
 import { QuickReplies } from "./QuickReplies";
 import { WebSearchResultsInline } from "./WebSearchResultsInline";
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+  message,
+  disableActions,
+}: {
+  message: Message;
+  disableActions: boolean;
+}) {
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   const isAssistant = message.role === "assistant";
@@ -49,6 +55,7 @@ function MessageBubble({ message }: { message: Message }) {
               totalFound={message.webResults.total_found}
               searchLatencyMs={message.webResults.search_latency_ms}
               showReportOption={message.showReportOption}
+              disabledActions={disableActions}
               onGenerateReport={() => {
                 // Focus input and suggest report query
                 const input = document.querySelector('input[type="text"]') as HTMLInputElement;
@@ -132,23 +139,27 @@ function MessageBubble({ message }: { message: Message }) {
         {/* Quick Replies - inline source selection */}
         {message.showQuickReplies && message.quickReplyData && (
           <QuickReplies
+            messageId={message.id}
             query={message.quickReplyData.query}
             resourceCount={message.quickReplyData.resourceCount}
             modes={message.quickReplyData.modes}
             showHeader={message.quickReplyData.showHeader}
             headerTitle={message.quickReplyData.headerTitle}
             headerDescription={message.quickReplyData.headerDescription}
+            disabled={disableActions}
           />
         )}
 
         {/* Error recovery quick retries */}
         {message.recoveryData && (
           <QuickReplies
+            messageId={message.id}
             query={message.recoveryData.query}
             modes={message.recoveryData.modes}
             showHeader
             headerTitle="Quick retry"
             headerDescription="Retry with an alternate source without retyping your question."
+            disabled={disableActions}
           />
         )}
       </div>
@@ -157,13 +168,13 @@ function MessageBubble({ message }: { message: Message }) {
 }
 
 export function ChatHistory() {
-  const { messages } = usePipelineStore();
+  const { messages, streamingAnswer, answerStreaming, activeRunId, messageActionableMap, resolvedActionMessages } = usePipelineStore();
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom
+  // Auto-scroll only on message boundaries, not every streamed token.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    bottomRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [messages.length, answerStreaming]);
 
   if (messages.length === 0) {
     return (
@@ -185,8 +196,28 @@ export function ChatHistory() {
   return (
     <div className="flex-1 overflow-y-auto px-4 py-6">
       {messages.map((message) => (
-        <MessageBubble key={message.id} message={message} />
+        <MessageBubble
+          key={message.id}
+          message={message}
+          disableActions={
+            Boolean(resolvedActionMessages[message.id]) ||
+            (Boolean(messageActionableMap[message.id]) &&
+              messageActionableMap[message.id] !== activeRunId)
+          }
+        />
       ))}
+      {answerStreaming && streamingAnswer && (
+        <div className="flex justify-start mb-6">
+          <div className="max-w-[85%] text-left">
+            <div className="text-sm leading-relaxed text-foreground">
+              <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-violet-400 prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground">
+                <div className="whitespace-pre-wrap break-words">{streamingAnswer}</div>
+                <span className="animate-pulse">▋</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       <div ref={bottomRef} />
     </div>
   );

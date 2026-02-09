@@ -2,6 +2,7 @@ import { ChatInput } from "@/components/custom/ChatInput";
 import { ChatHistory } from "@/components/custom/ChatHistory";
 import { AgentStatus } from "@/components/custom/AgentStatus";
 import { HITLModal } from "@/components/custom/HITLModal";
+import { QueryPlanModal } from "@/components/custom/QueryPlanModal";
 import { ThemeToggle } from "@/components/custom/ThemeToggle";
 import Link from "next/link";
 
@@ -48,6 +49,7 @@ export default function Home() {
 
       {/* HITL Modal */}
       <HITLModal />
+      <QueryPlanModal />
     </div>
   );
 }

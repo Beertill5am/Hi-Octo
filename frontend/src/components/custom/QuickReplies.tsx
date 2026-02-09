@@ -39,6 +39,7 @@ const MODE_CONFIG: Record<
 };
 
 interface QuickRepliesProps {
+  messageId?: string;
   query: string;
   resourceCount?: number;
   modes?: RunMode[];
@@ -46,9 +47,11 @@ interface QuickRepliesProps {
   headerTitle?: string;
   headerDescription?: string;
   onComplete?: () => void;
+  disabled?: boolean;
 }
 
 export function QuickReplies({
+  messageId,
   query,
   resourceCount = 0,
   modes = ["rag", "llm", "web"],
@@ -56,17 +59,21 @@ export function QuickReplies({
   headerTitle = "Choose a source",
   headerDescription = "Pick how Octo should answer this request.",
   onComplete,
+  disabled = false,
 }: QuickRepliesProps) {
   const [isLoading, setIsLoading] = useState<RunMode | null>(null);
-  const { startJob, handleSSEEvent, addMessage, closeSourcePicker } = usePipelineStore();
+  const { startJob, handleSSEEvent, addMessage, closeSourcePicker, markActionMessageResolved } = usePipelineStore();
 
   const handleSelect = async (mode: RunMode) => {
-    if (isLoading) return;
+    if (isLoading || disabled) return;
     setIsLoading(mode);
 
     try {
       const response = await startPipeline(query, mode);
       startJob(response.job_id, query, { skipUserMessage: true });
+      if (messageId) {
+        markActionMessageResolved(messageId);
+      }
 
       subscribeToPipelineStatus(
         response.job_id,
@@ -102,15 +109,16 @@ export function QuickReplies({
       {modes.map((mode) => {
         const config = MODE_CONFIG[mode];
         const isThisLoading = isLoading === mode;
+        const isDisabled = disabled || isLoading !== null;
         
         return (
           <button
             key={mode}
             onClick={() => handleSelect(mode)}
-            disabled={isLoading !== null}
+            disabled={isDisabled}
             title={config.tooltip}
             className={`w-full rounded-lg border px-3 py-3 text-left transition-all duration-200 ${config.color} ${
-              isLoading !== null && !isThisLoading ? "opacity-50" : ""
+              isDisabled && !isThisLoading ? "opacity-45 cursor-not-allowed" : ""
             }`}
           >
             <div className="flex items-start justify-between gap-2">

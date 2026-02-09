@@ -59,6 +59,16 @@ class HITLDecision(BaseModel):
     approved: bool = Field(..., description="Whether user approved")
     feedback: Optional[str] = Field(None, description="Optional user feedback")
 
+
+class QueryPlanDecision(BaseModel):
+    """Decision for post-expander query-plan checkpoint."""
+    approved: bool = Field(..., description="Whether user approved query plan")
+    edited_queries: Optional[List[str]] = Field(
+        None,
+        description="Optional edited list of queries to use when approved"
+    )
+    feedback: Optional[str] = Field(None, description="Optional approval/rejection feedback")
+
 class CategoryCreateRequest(BaseModel):
     name: str = Field(..., description="Category name")
     description: Optional[str] = Field(None, description="Optional category description")
@@ -169,6 +179,18 @@ class PipelineResultResponse(BaseModel):
     trace: Optional[List[Dict[str, Any]]] = None
 
 
+class QueryPlanPendingData(BaseModel):
+    """Data shown to user for query-plan review checkpoint."""
+    job_id: str
+    original_query: str
+    query: str
+    selected_category: str
+    queries: List[str] = Field(default_factory=list)
+    can_edit: bool = True
+    requires_approval: bool = True
+    message: str = "Review generated search queries before retrieval"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SSE EVENT MODELS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -197,6 +219,38 @@ class HITLPendingEvent(SSEEvent):
     """Emitted when pipeline reaches HITL checkpoint."""
     event: str = "hitl_pending"
     hitl_data: HITLPendingData
+
+
+class ReasoningChunkEvent(SSEEvent):
+    """Incremental semantic reasoning line for live UX transparency."""
+    event: str = "reasoning_chunk"
+    stage: str
+    text: str
+    seq: int
+
+
+class ReasoningDoneEvent(SSEEvent):
+    """Signals that reasoning stream for current run is complete."""
+    event: str = "reasoning_done"
+    stage: str
+    summary: str
+
+
+class QueryPlanPendingEvent(SSEEvent):
+    """Emitted when post-expander query plan requires user review."""
+    event: str = "query_plan_pending"
+    job_id: str
+    original_query: str
+    selected_category: str
+    queries: List[str] = Field(default_factory=list)
+    can_edit: bool = True
+
+
+class AnswerTokenEvent(SSEEvent):
+    """Token stream event during answer generation."""
+    event: str = "answer_token"
+    token: str
+    seq: int
 
 
 class CompleteEvent(SSEEvent):

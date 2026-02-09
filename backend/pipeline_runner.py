@@ -5,6 +5,7 @@ Handles job management, state tracking, and event streaming.
 import sys
 import os
 import asyncio
+import threading
 import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, Callable, AsyncGenerator
@@ -46,13 +47,28 @@ class PipelineJob:
     hitl_event: Optional[asyncio.Event] = None
     hitl_approved: Optional[bool] = None
     hitl_rejection_reason: Optional[str] = None  # User feedback on rejection
+    # Query plan HITL state
+    query_plan_data: Optional[Dict[str, Any]] = None
+    query_plan_event: Optional[threading.Event] = None
+    query_plan_approved: Optional[bool] = None
+    query_plan_edited_queries: Optional[list] = None
+    query_plan_rejection_reason: Optional[str] = None
     
     # Event streaming
     event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    event_seq: int = 0
+    reasoning_seq: int = 0
+    answer_token_seq: int = 0
+    answer_stream_buffer: str = ""
+    last_stream_emit_ts: float = 0.0
 
 
 class PipelineRunner:
     """Manages pipeline jobs and provides async interface for API."""
+    QUERY_PLAN_WAIT_TIMEOUT_S = 300.0
+    THREAD_EMIT_TIMEOUT_S = 5.0
+    STREAM_EMIT_MIN_INTERVAL_S = 0.08
+    STREAM_EMIT_MIN_CHARS = 48
     
     def __init__(self):
         self.jobs: Dict[str, PipelineJob] = {}
@@ -61,6 +77,31 @@ class PipelineRunner:
         self._retriever = None
         self._vectorstore = None
         self._categories = []
+        self._tracer = None
+        self._main_loop = None
+        self._node_labels: Dict[str, str] = {
+            "guardrail": "Safety Check",
+            "dispatcher": "Routing",
+            "expander": "Query Expansion",
+            "query_plan_hitl": "Query Plan Review",
+            "query_fanout": "Query Fanout",
+            "search_worker": "Parallel Search",
+            "deduplicator": "Deduplication",
+            "grader": "Relevance Grading",
+            "web_search": "Web Search",
+            "hitl_approval": "Web HITL Review",
+            "generate": "Answer Generation",
+            "code_tester": "Code Testing",
+            "critic": "Quality Review",
+            "increment_retry": "Retry Planning",
+            "summarize": "Summarization",
+        }
+
+    def _now_iso(self) -> str:
+        return datetime.now().isoformat()
+
+    def _label_for_node(self, node: str) -> str:
+        return self._node_labels.get(node, node.replace("_", " ").title())
     
     def initialize_pipeline(self):
         """
@@ -79,7 +120,10 @@ class PipelineRunner:
                 build_retriever, 
                 get_available_categories,
                 set_vectorstore,
-                SOURCE_FILES
+                set_query_plan_hitl_handler,
+                set_answer_token_stream_handler,
+                SOURCE_FILES,
+                tracer
             )
             
             self._app = app
@@ -88,9 +132,12 @@ class PipelineRunner:
             print("📚 Building vector store...")
             self._retriever, self._vectorstore = build_retriever(SOURCE_FILES, "python")
             self._categories = get_available_categories(self._vectorstore)
+            self._tracer = tracer
             
             # CRITICAL: Set the global vectorstore for search_worker_node
             set_vectorstore(self._vectorstore)
+            set_query_plan_hitl_handler(self._handle_query_plan_hitl)
+            set_answer_token_stream_handler(self._handle_answer_token_stream)
             
             self._pipeline_ready = True
             print(f"✅ Pipeline initialized with {len(self._categories)} categories")
@@ -111,7 +158,8 @@ class PipelineRunner:
             job_id=job_id,
             topic=topic,
             mode=mode,
-            hitl_event=asyncio.Event()
+            hitl_event=asyncio.Event(),
+            query_plan_event=threading.Event()
         )
         self.jobs[job_id] = job
         
@@ -123,6 +171,7 @@ class PipelineRunner:
     async def _run_pipeline(self, job: PipelineJob, categories: list = None):
         """Execute the pipeline and emit events."""
         try:
+            self._main_loop = asyncio.get_running_loop()
             job.status = JobStatus.RUNNING
             await self._emit_event(job, "status_change", {"status": "running"})
             
@@ -140,24 +189,50 @@ class PipelineRunner:
             # Prepare inputs
             inputs = {
                 "topic": job.topic,
+                "job_id": job.job_id,
                 "available_categories": categories or self._categories,
                 "retry_count": 0,
                 "revision_count": 0
             }
             
-            await self._emit_event(job, "pipeline_start", {"topic": job.topic})
-            
-            # Run pipeline (blocking - we wrap with custom callbacks later)
-            # For now, run synchronously in executor
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: self._app.invoke(inputs, {"recursion_limit": 50})
+            await self._emit_pipeline_start(job)
+            await self._emit_reasoning_chunk(
+                job,
+                "pipeline",
+                f"Analyzing your request: {job.topic}"
             )
+            
+            # Prefer native async streaming graph execution when available.
+            result: Dict[str, Any] = {}
+            if self._tracer is not None:
+                self._tracer.events = []
+
+            if hasattr(self._app, "astream"):
+                seen = 0
+                started_nodes: set[str] = set()
+                async for chunk in self._app.astream(inputs, {"recursion_limit": 50}):
+                    if isinstance(chunk, dict):
+                        result.update(chunk)
+                    seen = await self._drain_trace_events(job, seen, started_nodes)
+                await self._drain_trace_events(job, seen, started_nodes)
+            else:
+                loop = asyncio.get_event_loop()
+                invoke_future = loop.run_in_executor(
+                    None,
+                    lambda: self._app.invoke(inputs, {"recursion_limit": 50})
+                )
+                result = await self._poll_trace_until_complete(job, invoke_future)
+
+            if result.get("query_plan_approved") is False:
+                job.status = JobStatus.CANCELLED
+                reason = result.get("query_plan_rejection_reason") or "Query plan rejected."
+                await self._emit_event(job, "cancelled", {"reason": reason})
+                return
             
             # Extract answer
             job.answer = result.get("answer", "No answer generated")
             job.status = JobStatus.COMPLETED
+            await self._emit_event(job, "reasoning_done", {"stage": "pipeline", "summary": "Pipeline execution complete."})
             
             await self._emit_event(job, "complete", {"answer": job.answer})
             
@@ -166,9 +241,144 @@ class PipelineRunner:
             job.error = str(e)
             await self._emit_event(job, "error", {"error": str(e)})
 
+    def _handle_query_plan_hitl(
+        self,
+        job_id: str,
+        topic: str,
+        selected_category: str,
+        queries: list
+    ) -> Dict[str, Any]:
+        """
+        Blocking callback invoked by model graph.
+        Pauses pipeline until frontend approves/rejects/edits query plan.
+        """
+        job = self.jobs.get(job_id)
+        if not job:
+            return {"approved": True, "queries": queries, "reason": "Job not found; auto-approved"}
+
+        job.status = JobStatus.HITL_WAITING
+        job.query_plan_data = {
+            "job_id": job_id,
+            "original_query": topic,
+            "query": topic,
+            "selected_category": selected_category,
+            "queries": queries,
+            "can_edit": True,
+            "requires_approval": True,
+            "message": "Review generated search queries before retrieval."
+        }
+        if job.query_plan_event is None:
+            job.query_plan_event = threading.Event()
+        else:
+            job.query_plan_event.clear()
+
+        loop = self._main_loop
+        if loop is None:
+            return {"approved": True, "queries": queries, "reason": "No loop; auto-approved"}
+        fut = asyncio.run_coroutine_threadsafe(
+            self._emit_event(job, "query_plan_pending", job.query_plan_data),
+            loop
+        )
+        try:
+            fut.result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+        except Exception:
+            # Do not deadlock query-plan flow if the SSE push stalls.
+            pass
+
+        approved_in_time = job.query_plan_event.wait(timeout=self.QUERY_PLAN_WAIT_TIMEOUT_S)
+        if not approved_in_time:
+            reason = f"Query plan approval timed out after {int(self.QUERY_PLAN_WAIT_TIMEOUT_S)} seconds."
+            job.query_plan_approved = False
+            job.query_plan_rejection_reason = reason
+            job.status = JobStatus.CANCELLED
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._emit_event(job, "query_plan_rejected", {"reason": reason}),
+                    loop
+                ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+            except Exception:
+                pass
+            return {"approved": False, "queries": queries, "reason": reason}
+
+        if job.query_plan_approved:
+            edited_queries = job.query_plan_edited_queries or queries
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._emit_event(job, "query_plan_approved", {
+                        "queries": edited_queries,
+                        "edited": edited_queries != queries
+                    }),
+                    loop
+                ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+            except Exception:
+                pass
+            job.status = JobStatus.RUNNING
+            return {"approved": True, "queries": edited_queries, "reason": ""}
+
+        reason = job.query_plan_rejection_reason or "User rejected query plan."
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._emit_event(job, "query_plan_rejected", {"reason": reason}),
+                loop
+            ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+        except Exception:
+            pass
+        return {"approved": False, "queries": queries, "reason": reason}
+
+    def _handle_answer_token_stream(self, job_id: str, token: str, done: bool = False, final_text: str = ""):
+        """Forward streamed answer tokens from model graph to SSE."""
+        job = self.jobs.get(job_id)
+        loop = self._main_loop
+        if not job or loop is None:
+            return
+
+        if done:
+            if job.answer_stream_buffer:
+                buffered = job.answer_stream_buffer
+                job.answer_stream_buffer = ""
+                job.answer_token_seq += 1
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._emit_event(job, "answer_token", {"token": buffered, "seq": job.answer_token_seq}),
+                        loop
+                    ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+                except Exception:
+                    pass
+
+            token_count = len(final_text.split()) if final_text else 0
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._emit_event(job, "answer_done", {"answer": final_text, "token_count": token_count}),
+                    loop
+                ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+            except Exception:
+                pass
+            return
+
+        if not token:
+            return
+        job.answer_stream_buffer += token
+        now = time.monotonic()
+        should_emit = (
+            len(job.answer_stream_buffer) >= self.STREAM_EMIT_MIN_CHARS or
+            (job.last_stream_emit_ts == 0.0) or
+            (now - job.last_stream_emit_ts >= self.STREAM_EMIT_MIN_INTERVAL_S)
+        )
+        if not should_emit:
+            return
+
+        token_chunk = job.answer_stream_buffer
+        job.answer_stream_buffer = ""
+        job.last_stream_emit_ts = now
+        job.answer_token_seq += 1
+        asyncio.run_coroutine_threadsafe(
+            self._emit_event(job, "answer_token", {"token": token_chunk, "seq": job.answer_token_seq}),
+            loop
+        )
+
     async def _run_llm_job(self, job: PipelineJob):
         """Run a lightweight LLM-only response (no retrieval)."""
-        await self._emit_event(job, "pipeline_start", {"topic": job.topic, "mode": "llm"})
+        await self._emit_pipeline_start(job)
         llm = ChatOllama(model="qwen3:8b", temperature=0.3, num_ctx=4096)
         prompt = (
             "You are Octo, a friendly assistant. Answer clearly and briefly. "
@@ -185,8 +395,8 @@ class PipelineRunner:
         Run a web-search response - streams results directly to chat.
         No approval needed - user already chose web search explicitly.
         """
-        await self._emit_event(job, "pipeline_start", {"topic": job.topic, "mode": "web"})
-        await self._emit_event(job, "node_start", {"node": "web_search"})
+        await self._emit_pipeline_start(job)
+        await self._emit_node_start(job, "web_search")
         
         # Track timing for transparency
         search_start = time.time()
@@ -199,11 +409,7 @@ class PipelineRunner:
         raw_results = search_response.get("results", [])
         ai_summary = search_response.get("answer")
         
-        await self._emit_event(job, "node_end", {
-            "node": "web_search", 
-            "latency_ms": search_latency_ms,
-            "results_count": len(raw_results)
-        })
+        await self._emit_node_end(job, "web_search", search_latency_ms, {"results_count": len(raw_results)})
         
         if not raw_results:
             job.answer = "I couldn't find relevant web results. Try rephrasing or use your local knowledge base."
@@ -233,7 +439,7 @@ class PipelineRunner:
         
         # Generate AI summary if not provided by Tavily
         if not ai_summary:
-            await self._emit_event(job, "node_start", {"node": "summarize"})
+            await self._emit_node_start(job, "summarize")
             
             snippets = "\n".join(
                 f"- {r['title']}: {r['snippet'][:200]}" 
@@ -250,7 +456,7 @@ class PipelineRunner:
             summary_response = llm.invoke(summary_prompt)
             ai_summary = summary_response.content if summary_response else "Summary not available."
             
-            await self._emit_event(job, "node_end", {"node": "summarize"})
+            await self._emit_node_end(job, "summarize", 0.0)
         
         # Emit web results directly to chat (no HITL - inline display)
         await self._emit_event(job, "web_results", {
@@ -272,15 +478,126 @@ class PipelineRunner:
     
     async def _emit_event(self, job: PipelineJob, event_type: str, data: dict):
         """Push event to job's queue for SSE streaming."""
+        job.event_seq += 1
         event = {
             "event": event_type,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": self._now_iso(),
+            "seq": job.event_seq,
             "data": data
         }
         job.trace.append(event)
         await job.event_queue.put(event)
+
+    async def _emit_pipeline_start(self, job: PipelineJob):
+        await self._emit_event(job, "pipeline_start", {
+            "job_id": job.job_id,
+            "topic": job.topic,
+            "mode": job.mode,
+            "started_at": self._now_iso(),
+        })
+
+    async def _emit_node_start(self, job: PipelineJob, node: str, attempt: int = 1):
+        await self._emit_event(job, "node_start", {
+            "node": node,
+            "label": self._label_for_node(node),
+            "attempt": attempt,
+            "ts": self._now_iso(),
+        })
+
+    async def _emit_node_end(self, job: PipelineJob, node: str, latency_ms: float, meta: Optional[Dict[str, Any]] = None):
+        payload: Dict[str, Any] = {
+            "node": node,
+            "label": self._label_for_node(node),
+            "latency_ms": latency_ms,
+            "ts": self._now_iso(),
+        }
+        if meta:
+            payload["meta"] = meta
+        await self._emit_event(job, "node_end", payload)
+
+    async def _emit_reasoning_chunk(self, job: PipelineJob, stage: str, text: str):
+        """Emit a single semantic reasoning log line."""
+        job.reasoning_seq += 1
+        await self._emit_event(job, "reasoning_chunk", {
+            "stage": stage,
+            "text": text,
+            "seq": job.reasoning_seq
+        })
+
+    async def _poll_trace_until_complete(self, job: PipelineJob, invoke_future):
+        """Poll model trace events while pipeline executes in a background thread."""
+        if self._tracer is None:
+            return await invoke_future
+
+        seen = 0
+        started_nodes = set()
+
+        while not invoke_future.done():
+            seen = await self._drain_trace_events(job, seen, started_nodes)
+            await asyncio.sleep(0.1)
+
+        seen = await self._drain_trace_events(job, seen, started_nodes)
+        return await invoke_future
+
+    async def _drain_trace_events(self, job: PipelineJob, seen: int, started_nodes: set) -> int:
+        """Convert trace logger events into SSE node and reasoning events."""
+        if self._tracer is None:
+            return seen
+
+        while seen < len(self._tracer.events):
+            trace_event = self._tracer.events[seen]
+            seen += 1
+
+            raw_node = str(trace_event.get("node", "unknown"))
+            node = raw_node.replace("_node", "")
+            latency_s = float(trace_event.get("latency", 0.0) or 0.0)
+            payload = str(trace_event.get("payload", ""))
+
+            if node not in started_nodes:
+                started_nodes.add(node)
+                await self._emit_node_start(job, node, attempt=1)
+
+            await self._emit_node_end(job, node, round(latency_s * 1000, 2))
+
+            reasoning_text = self._reasoning_text_for_node(node, payload)
+            if reasoning_text:
+                await self._emit_reasoning_chunk(job, node, reasoning_text)
+
+        return seen
+
+    def _reasoning_text_for_node(self, node: str, payload: str) -> str:
+        """Map node outputs to concise semantic reasoning logs."""
+        if node == "guardrail":
+            return "Safety checks completed. Query is allowed."
+        if node == "dispatcher":
+            return "Routing the query to the most relevant knowledge domain."
+        if node == "expand_query":
+            return "Generating multiple query variants for parallel retrieval."
+        if node == "query_plan_hitl":
+            return "Waiting for your approval on generated search queries."
+        if node == "search_worker":
+            return "Running parallel searches across query variants."
+        if node == "deduplicate":
+            return "Merging overlapping retrieval results and removing duplicates."
+        if node == "grade_documents":
+            return "Evaluating retrieved content for relevance to your question."
+        if node == "increment_retry":
+            return "Low relevance detected. Broadening the search scope for another pass."
+        if node == "generate_answer":
+            return "Drafting the response from validated context."
+        if node == "code_tester":
+            return "Verifying generated code snippets for execution safety."
+        if node == "critic":
+            return "Reviewing the draft for quality and completeness."
+        if node == "web_search":
+            return "Local context was insufficient. Performing web search fallback."
+        if node == "hitl_approval":
+            return "Waiting for user review before continuing expensive generation."
+        if "out_of_domain" in payload:
+            return "The query appears outside the current knowledge domains."
+        return ""
     
-    async def stream_events(self, job_id: str) -> AsyncGenerator[dict, None]:
+    async def stream_events(self, job_id: str, last_seq: int = 0) -> AsyncGenerator[dict, None]:
         """
         Async generator that yields events for SSE streaming.
         """
@@ -288,6 +605,11 @@ class PipelineRunner:
         if not job:
             yield {"event": "error", "data": {"error": "Job not found"}}
             return
+
+        if last_seq > 0:
+            for event in job.trace:
+                if int(event.get("seq", 0)) > last_seq:
+                    yield event
         
         while True:
             try:
@@ -303,7 +625,9 @@ class PipelineRunner:
                     break
                     
             except asyncio.TimeoutError:
-                # Send keepalive
+                if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+                    break
+                # Send keepalive while job is still active.
                 yield {"event": "keepalive", "data": {}}
     
     def get_job(self, job_id: str) -> Optional[PipelineJob]:
@@ -315,10 +639,42 @@ class PipelineRunner:
         job = self.jobs.get(job_id)
         if not job or job.status != JobStatus.HITL_WAITING:
             return False
+        if not job.hitl_data:
+            return False
         
         job.hitl_approved = True
         job.hitl_event.set()  # Unblock pipeline
         await self._emit_event(job, "hitl_approved", {"feedback": feedback})
+        return True
+
+    async def approve_query_plan(self, job_id: str, edited_queries: list = None, feedback: str = None) -> bool:
+        """Approve query-plan HITL checkpoint and continue pipeline."""
+        job = self.jobs.get(job_id)
+        if not job or job.status != JobStatus.HITL_WAITING:
+            return False
+        if not job.query_plan_data:
+            return False
+
+        job.query_plan_approved = True
+        job.query_plan_edited_queries = edited_queries or job.query_plan_data.get("queries", [])
+        if feedback:
+            job.query_plan_rejection_reason = feedback
+        if job.query_plan_event:
+            job.query_plan_event.set()
+        return True
+
+    async def reject_query_plan(self, job_id: str, reason: str = None) -> bool:
+        """Reject query-plan HITL checkpoint and stop this pipeline run."""
+        job = self.jobs.get(job_id)
+        if not job or job.status != JobStatus.HITL_WAITING:
+            return False
+        if not job.query_plan_data:
+            return False
+
+        job.query_plan_approved = False
+        job.query_plan_rejection_reason = reason or "User rejected query plan."
+        if job.query_plan_event:
+            job.query_plan_event.set()
         return True
     
     async def reject_hitl(self, job_id: str, reason: str = None) -> bool:
@@ -326,11 +682,38 @@ class PipelineRunner:
         job = self.jobs.get(job_id)
         if not job or job.status != JobStatus.HITL_WAITING:
             return False
+        if not job.hitl_data:
+            return False
         
         job.hitl_approved = False
         job.status = JobStatus.CANCELLED
         job.hitl_event.set()
         await self._emit_event(job, "cancelled", {"reason": reason or "User rejected"})
+        return True
+
+    async def cancel_job(self, job_id: str, reason: str = "Cancelled by user") -> bool:
+        """Cancel an active job and notify subscribers."""
+        job = self.jobs.get(job_id)
+        if not job:
+            return False
+        if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+            return False
+        job.status = JobStatus.CANCELLED
+        await self._emit_event(job, "cancelled", {"reason": reason})
+        return True
+
+    async def resume_job(self, job_id: str) -> bool:
+        """
+        Resume streaming for an in-flight job.
+        This does not restart computation; it marks status back to running when possible.
+        """
+        job = self.jobs.get(job_id)
+        if not job:
+            return False
+        if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+            return False
+        job.status = JobStatus.RUNNING
+        await self._emit_event(job, "status_change", {"status": "running"})
         return True
 
 
