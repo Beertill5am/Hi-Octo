@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 
-from modelTest5 import DB_PATH, get_available_categories, set_vectorstore
+from agent_pipeline import DB_PATH, get_available_categories, set_vectorstore
 
 _VECTORSTORE: Optional[Chroma] = None
 _COLLECTION_NAME = "python_knowledge_base_v2"

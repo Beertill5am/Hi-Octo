@@ -145,6 +145,9 @@ class EnhancedSearchResult(BaseModel):
     domain: str = Field("", description="Extracted domain (e.g., python.org)")
     word_count: int = Field(0, description="Content word count")
     retrieved_at: str = Field("", description="ISO timestamp when retrieved")
+    source_id: Optional[str] = Field(None, description="Stable citation/source id like S1")
+    citation: Optional[str] = Field(None, description="Short quoted evidence text")
+    page: Optional[int] = Field(None, description="1-based page number when available")
 
 
 class HITLPendingData(BaseModel):
@@ -154,6 +157,7 @@ class HITLPendingData(BaseModel):
     """
     job_id: str
     query: str
+    hitl_type: str = Field("web_search_review", description="web_search_review | retrieval_review | pre_web_search_review")
     ai_summary: Optional[str] = None
     search_results: List[EnhancedSearchResult] = Field(default_factory=list)
     # Transparency metadata

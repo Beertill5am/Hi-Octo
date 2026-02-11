@@ -80,6 +80,11 @@ export interface ReasoningLogEntry {
   done: boolean;
 }
 
+export interface GraderThinkingState {
+  text: string;
+  done: boolean;
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STORE
@@ -104,6 +109,7 @@ interface PipelineStore {
   resolvedActionMessages: Record<string, boolean>;
   liveReasoning: ReasoningLogEntry[];
   reasoningDone: boolean;
+  graderThinking: GraderThinkingState;
   streamingAnswer: string;
   answerStreaming: boolean;
   
@@ -152,6 +158,7 @@ const initialState = {
   resolvedActionMessages: {},
   liveReasoning: [],
   reasoningDone: false,
+  graderThinking: { text: "", done: false },
   streamingAnswer: "",
   answerStreaming: false,
   hitlData: null,
@@ -189,6 +196,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       resolvedActionMessages: {},
       liveReasoning: [],
       reasoningDone: false,
+      graderThinking: { text: "", done: false },
       streamingAnswer: "",
       answerStreaming: false,
     });
@@ -235,13 +243,34 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         break;
         
       case "hitl_pending":
+        {
+          const raw = data as Record<string, unknown> & { results?: unknown[]; search_results?: unknown[] };
+          const normalizedResults = Array.isArray(raw.search_results)
+            ? raw.search_results
+            : Array.isArray(raw.results)
+            ? raw.results
+            : [];
+          const normalizedHitlData: HITLPendingData = {
+            ...(raw as unknown as HITLPendingData),
+            search_results: normalizedResults as HITLPendingData["search_results"],
+            results_shown: Number(raw.results_shown ?? normalizedResults.length),
+            total_results_found: Number(raw.total_results_found ?? normalizedResults.length),
+          };
         set({
           status: "hitl_waiting",
-          hitlData: data as unknown as HITLPendingData,
+          hitlData: normalizedHitlData,
           showHITLModal: true,
         });
-        get().addMessage("system", "⏸️ Waiting for your approval on web search results...");
+        get().addMessage(
+          "system",
+          (raw.hitl_type as string | undefined) === "retrieval_review"
+            ? "⏸️ Waiting for your approval on retrieved citations before generation..."
+            : (raw.hitl_type as string | undefined) === "pre_web_search_review"
+            ? "⏸️ Waiting for your approval to run web search..."
+            : "⏸️ Waiting for your approval on web search results..."
+        );
         break;
+      }
 
       case "query_plan_pending":
         set({
@@ -312,6 +341,43 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           liveReasoning: state.liveReasoning.map((entry) => ({ ...entry, done: true })),
         }));
         break;
+
+      case "grader_update":
+        set((state) => {
+          const incoming = String(data.text || "");
+          const append = incoming
+            ? `${state.graderThinking.text}${state.graderThinking.text ? "\n" : ""}${incoming}`
+            : state.graderThinking.text;
+          const meta = (data as { meta?: Record<string, unknown> }).meta || {};
+          const verified = Array.isArray(meta.verified_citations) ? meta.verified_citations : [];
+          const preloadHitl =
+            Boolean(data.done) &&
+            verified.length > 0 &&
+            !state.hitlData;
+          const preloadedHitlData = preloadHitl
+            ? {
+                job_id: state.jobId || "",
+                hitl_type: "retrieval_review" as const,
+                query: state.currentQuery || "",
+                search_results: verified as HITLPendingData["search_results"],
+                total_results_found: verified.length,
+                results_shown: verified.length,
+                search_depth: "local_rag",
+                search_latency_ms: 0,
+                reason_for_web_search: "Relevant local citations were found. Approve them before generation.",
+                requires_approval: true,
+                message: "Review retrieved citations before answer generation.",
+              }
+            : state.hitlData;
+          return {
+            graderThinking: {
+              text: append.trim(),
+              done: Boolean(data.done),
+            },
+            hitlData: preloadedHitlData,
+          };
+        });
+        break;
         
       case "complete": {
         const startedAt = get().jobStartedAt;
@@ -324,9 +390,12 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           reasoningDone: true,
           answerStreaming: false,
         });
-        // Only add message if web_results didn't already add one
-        if (!data.show_report_option && !streamed) {
-          get().addMessage("assistant", (data.answer as string) || streamed, { isNew: false });
+        // Persist streamed answer to chat history (web flow already renders its own card).
+        if (!data.show_report_option) {
+          const finalContent = streamed || String(data.answer || "");
+          if (finalContent.trim()) {
+            get().addMessage("assistant", finalContent, { isNew: false });
+          }
         }
         break;
       }

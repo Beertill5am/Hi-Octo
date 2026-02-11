@@ -1,35 +1,65 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { usePipelineStore } from "@/lib/store";
-import { approveHITL, rejectHITL } from "@/lib/api";
+import { approveHITL, getHITLPending, rejectHITL } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Card } from "@/components/ui/card";
 import { SearchResultCard } from "./SearchResultCard";
-import { AlertTriangle, Search, Clock, Layers, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import { CheckCircle, Loader2, Search, XCircle } from "lucide-react";
 
-/**
- * Enhanced HITLModal - Professional HITL approval interface
- * with full transparency and strict approval protocol
- */
+function extractSourceRefs(text: string): string[] {
+  if (!text) return [];
+  const matches = text.match(/\bSource\s*#\s*(\d+)\b/gi) || [];
+  const refs = matches
+    .map((match) => {
+      const digits = match.match(/\d+/)?.[0];
+      return digits ? `Source #${Number(digits)}` : "";
+    })
+    .filter(Boolean);
+  return Array.from(new Set(refs));
+}
+
+function filterSummaryLinesBySources(summary: string, allowedSources: Set<string>): string {
+  if (!summary) return "";
+  const keptLines: string[] = [];
+
+  for (const line of summary.split(/\r?\n/)) {
+    const stripped = line.trim();
+    if (!stripped) continue;
+
+    const refs = extractSourceRefs(stripped);
+    if (refs.length > 0) {
+      if (refs.every((ref) => allowedSources.has(ref))) {
+        keptLines.push(stripped);
+      }
+      continue;
+    }
+
+    if (stripped.toLowerCase().startsWith("coverage:")) {
+      keptLines.push(stripped);
+    }
+  }
+
+  return keptLines.join("\n").trim();
+}
 
 export function HITLModal() {
-  const { showHITLModal, hitlData, closeHITLModal, jobId, handleSSEEvent } = usePipelineStore();
-  
+  const {
+    showHITLModal,
+    hitlData,
+    setHITLData,
+    closeHITLModal,
+    jobId,
+    status,
+    handleSSEEvent,
+  } = usePipelineStore();
   const [isApproving, setIsApproving] = useState(false);
   const [isRejecting, setIsRejecting] = useState(false);
+  const [isLoadingPending, setIsLoadingPending] = useState(false);
   const [rejectionReason, setRejectionReason] = useState("");
   const [showRejectionInput, setShowRejectionInput] = useState(false);
-  
-  // Reset state when modal opens
+  const [visibleCount, setVisibleCount] = useState(0);
+
   useEffect(() => {
     if (showHITLModal) {
       setRejectionReason("");
@@ -38,6 +68,83 @@ export function HITLModal() {
       setIsRejecting(false);
     }
   }, [showHITLModal]);
+
+  useEffect(() => {
+    const shouldHydrate =
+      status === "hitl_waiting" &&
+      Boolean(jobId) &&
+      (!hitlData || !Array.isArray(hitlData.search_results));
+
+    if (!shouldHydrate) return;
+
+    let cancelled = false;
+    setIsLoadingPending(true);
+    getHITLPending(jobId as string)
+      .then((pending) => {
+        if (!cancelled) {
+          setHITLData(pending);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error("Failed to hydrate HITL pending payload:", error);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingPending(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [status, jobId, hitlData, setHITLData]);
+
+  const results = useMemo(() => hitlData?.search_results ?? [], [hitlData?.search_results]);
+  const isRetrievalReview = hitlData?.hitl_type === "retrieval_review";
+  const isPreWebSearchReview = hitlData?.hitl_type === "pre_web_search_review";
+  const validatedSummary = useMemo(() => {
+    if (isPreWebSearchReview || !hitlData?.ai_summary) return "";
+
+    const allowedSources = new Set<string>();
+    results.forEach((result, index) => {
+      if (result?.source_id) {
+        extractSourceRefs(result.source_id).forEach((ref) => allowedSources.add(ref));
+      }
+      allowedSources.add(`Source #${index + 1}`);
+    });
+
+    return filterSummaryLinesBySources(hitlData.ai_summary, allowedSources);
+  }, [hitlData?.ai_summary, isPreWebSearchReview, results]);
+
+  useEffect(() => {
+    if (status !== "hitl_waiting" || !results.length) {
+      setVisibleCount(0);
+      return;
+    }
+    setVisibleCount(0);
+    const timer = window.setInterval(() => {
+      setVisibleCount((prev) => {
+        if (prev >= results.length) {
+          window.clearInterval(timer);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, 20);
+    return () => window.clearInterval(timer);
+  }, [status, results.length]);
+
+  if (status !== "hitl_waiting") return null;
+
+  if (!hitlData) {
+    return (
+      <div className="mb-5 text-sm italic text-zinc-500">
+        {isLoadingPending ? "Loading citation review..." : "Waiting for citation review data..."}
+      </div>
+    );
+  }
 
   const handleApprove = async () => {
     if (!jobId) return;
@@ -67,170 +174,90 @@ export function HITLModal() {
     }
   };
 
-  // Don't render if no data
-  if (!hitlData) return null;
-  
-  // Format latency for display
-  const formatLatency = (ms: number) => {
-    if (ms >= 1000) {
-      return `${(ms / 1000).toFixed(1)}s`;
-    }
-    return `${Math.round(ms)}ms`;
-  };
-
   return (
-    <Dialog 
-      open={showHITLModal} 
-      onOpenChange={(open) => {
-        // Prevent closing without explicit action - show rejection input instead
-        if (!open && showHITLModal) {
-          setShowRejectionInput(true);
-        }
-      }}
-    >
-      <DialogContent 
-        className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col"
-        // Prevent accidental dismissal
-        onPointerDownOutside={(e) => e.preventDefault()}
-        onEscapeKeyDown={(e) => {
-          e.preventDefault();
-          setShowRejectionInput(true);
-        }}
-      >
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-xl">
-            <Search className="w-5 h-5 text-primary" />
-            Web Search Review
-          </DialogTitle>
-          <DialogDescription asChild>
-            <div className="space-y-3">
-              {/* Why this was triggered */}
-              <Card className="p-3 bg-amber-500/10 border-amber-500/30">
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5" />
-                  <div>
-                    <p className="text-sm font-medium text-amber-600 dark:text-amber-400">
-                      Why Web Search Was Triggered
-                    </p>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      {hitlData.reason_for_web_search || "Your knowledge base didn't have sufficient information for this query."}
-                    </p>
-                  </div>
-                </div>
-              </Card>
-              
-              {/* Search metadata */}
-              <div className="flex flex-wrap gap-3 text-xs">
-                <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-muted">
-                  <Search className="w-3 h-3" />
-                  <span>Query: <strong className="font-mono">{hitlData.query}</strong></span>
-                </div>
-                <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-muted">
-                  <Layers className="w-3 h-3" />
-                  <span>{hitlData.results_shown} of {hitlData.total_results_found} results</span>
-                </div>
-                <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-muted">
-                  <Clock className="w-3 h-3" />
-                  <span>Search: {formatLatency(hitlData.search_latency_ms)}</span>
-                </div>
-                <div className="px-2 py-1 rounded-full bg-primary/10 text-primary">
-                  {hitlData.search_depth === "advanced" ? "🔍 Deep search" : "⚡ Quick search"}
-                </div>
-              </div>
-            </div>
-          </DialogDescription>
-        </DialogHeader>
+    <section className="mb-6">
+      <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
+        <Search className="h-4 w-4 text-violet-400" />
+        {isRetrievalReview ? "Citation Review" : isPreWebSearchReview ? "Web Search Approval" : "Web Review"}
+      </div>
+      <p className="mb-4 text-xs text-zinc-500">
+        {hitlData.reason_for_web_search || (isRetrievalReview
+          ? "Review citations before generation."
+          : isPreWebSearchReview
+          ? "Local retrieval was not sufficient. Approve to run web search."
+          : "Review sources before generation.")}
+      </p>
 
-        {/* Scrollable content area */}
-        <div className="flex-1 overflow-y-auto py-4 space-y-4">
-          {/* AI Summary */}
-          {hitlData.ai_summary && (
-            <Card className="p-4 bg-primary/5 border-primary/20">
-              <p className="text-sm font-medium mb-2 flex items-center gap-2">
-                <span className="text-lg">💡</span>
-                AI-Generated Summary
-              </p>
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                {hitlData.ai_summary}
-              </p>
-            </Card>
-          )}
-          
-          {/* Search results */}
-          <div className="space-y-3">
-            <h4 className="text-sm font-medium text-muted-foreground">
-              📄 Sources Found ({hitlData.search_results?.length || 0})
-            </h4>
-            {hitlData.search_results?.map((result, i) => (
-              <SearchResultCard key={i} result={result} index={i} />
-            ))}
+      {validatedSummary && !isPreWebSearchReview && (
+        <div className="mb-4 rounded-md border border-zinc-800 bg-zinc-950/70 p-3">
+          <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">LLM Summary</p>
+          <p className="whitespace-pre-wrap text-xs text-zinc-300">{validatedSummary}</p>
+        </div>
+      )}
+
+      <div className="mb-4 flex flex-wrap gap-2 text-xs text-zinc-400">
+        <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5">
+          Query: <strong className="font-mono text-zinc-200">{hitlData.query}</strong>
+        </span>
+        {!isPreWebSearchReview && (
+          <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5">
+            {hitlData.results_shown} of {hitlData.total_results_found} results
+          </span>
+        )}
+      </div>
+
+      {!isPreWebSearchReview && (
+        <div className="space-y-4">
+          {results.slice(0, visibleCount).map((result, i) => (
+            <SearchResultCard key={i} result={result} index={i} animateTyping />
+          ))}
+        </div>
+      )}
+
+      {showRejectionInput ? (
+        <div className="mt-4 space-y-2 border-t border-zinc-800 pt-3">
+          <textarea
+            placeholder="Optional reason for rejection..."
+            value={rejectionReason}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setRejectionReason(e.target.value)}
+            className="flex min-h-[54px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500"
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" className="h-8 rounded-full px-3" onClick={() => setShowRejectionInput(false)}>
+              Back
+            </Button>
+            <Button variant="outline" className="h-8 rounded-full border-zinc-300 bg-white px-3 text-black hover:bg-zinc-100" onClick={handleReject} disabled={isRejecting || isApproving}>
+              {isRejecting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <XCircle className="mr-1 h-3.5 w-3.5" />}
+              Reject
+            </Button>
           </div>
         </div>
-
-        {/* Footer with strict approval */}
-        <DialogFooter className="border-t pt-4 gap-2">
-          {showRejectionInput ? (
-            /* Rejection feedback form */
-            <div className="w-full space-y-3">
-              <p className="text-sm text-muted-foreground">
-                Would you like to provide feedback on why you&apos;re canceling? (optional)
-              </p>
-              <textarea
-                placeholder="e.g., Results don&apos;t seem relevant, I&apos;ll try a different query..."
-                value={rejectionReason}
-                onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setRejectionReason(e.target.value)}
-                className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              />
-              <div className="flex gap-2 justify-end">
-                <Button 
-                  variant="outline" 
-                  onClick={() => setShowRejectionInput(false)}
-                >
-                  Back to review
-                </Button>
-                <Button 
-                  variant="destructive" 
-                  onClick={handleReject}
-                  disabled={isRejecting}
-                >
-                  {isRejecting ? (
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  ) : (
-                    <XCircle className="w-4 h-4 mr-2" />
-                  )}
-                  Cancel & Close
-                </Button>
-              </div>
-            </div>
-          ) : (
-            /* Main action buttons */
-            <>
-              <div className="flex-1 text-xs text-muted-foreground">
-                ⚠️ By approving, Octo will synthesize an answer from these sources.
-              </div>
-              <Button 
-                variant="outline" 
-                onClick={() => setShowRejectionInput(true)}
-                disabled={isApproving || isRejecting}
-              >
-                <XCircle className="w-4 h-4 mr-2" />
-                Reject
-              </Button>
-              <Button 
-                onClick={handleApprove}
-                disabled={isApproving || isRejecting || !hitlData.search_results?.length}
-              >
-                {isApproving ? (
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                ) : (
-                  <CheckCircle className="w-4 h-4 mr-2" />
-                )}
-                Approve & Generate
-              </Button>
-            </>
-          )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      ) : (
+        <div className="mt-4 flex items-center gap-2 border-t border-zinc-800 pt-3">
+          <div className="flex-1 text-xs italic text-zinc-500">
+            {isPreWebSearchReview
+              ? "Approve to run web search."
+              : "Approve to continue generation from these citations."}
+          </div>
+          <Button
+            variant="outline"
+            className="h-8 rounded-full border-zinc-300 bg-white px-3 text-black hover:bg-zinc-100"
+            onClick={() => setShowRejectionInput(true)}
+            disabled={isApproving || isRejecting}
+          >
+            <XCircle className="mr-1 h-3.5 w-3.5" />
+            Reject
+          </Button>
+          <Button
+            className="h-8 rounded-full bg-violet-600 px-3 text-white hover:bg-violet-500"
+            onClick={handleApprove}
+            disabled={isApproving || isRejecting}
+          >
+            {isApproving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckCircle className="mr-1 h-3.5 w-3.5" />}
+            {isPreWebSearchReview ? "Approve & Search Web" : "Approve & Generate"}
+          </Button>
+        </div>
+      )}
+    </section>
   );
 }

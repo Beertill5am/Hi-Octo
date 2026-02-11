@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Tuple
 
-from modelTest5 import intelligent_chunking, router
-from modelTest5_extensions import preflight_analysis, print_preflight_report
+from agent_pipeline import intelligent_chunking, router
+from agent_pipeline_extensions import preflight_analysis, print_preflight_report
 
 
 def index_file(file_path: str) -> Tuple[List[Any], Dict[str, Any]]:

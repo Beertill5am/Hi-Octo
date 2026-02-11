@@ -29,9 +29,11 @@ async def get_pending_hitl(job_id: str):
     
     hitl_data = job.hitl_data or {}
     
-    # Convert to enhanced schema with full metadata
+    # Convert to enhanced schema with full metadata.
+    # Accept both legacy "results" and normalized "search_results".
     search_results = []
-    for result in hitl_data.get("results", []):
+    raw_results = hitl_data.get("search_results") or hitl_data.get("results", [])
+    for result in raw_results:
         if isinstance(result, dict):
             search_results.append(EnhancedSearchResult(
                 title=result.get("title", "Untitled"),
@@ -41,11 +43,16 @@ async def get_pending_hitl(job_id: str):
                 relevance_score=result.get("relevance_score", 0.0),
                 domain=result.get("domain", ""),
                 word_count=result.get("word_count", 0),
-                retrieved_at=result.get("retrieved_at", "")
+                retrieved_at=result.get("retrieved_at", ""),
+                source_id=result.get("source_id"),
+                citation=result.get("citation"),
+                page=result.get("page")
             ))
     
+    hitl_type = hitl_data.get("hitl_type", "web_search_review")
     return HITLPendingData(
         job_id=job_id,
+        hitl_type=hitl_type,
         query=job.topic,
         ai_summary=hitl_data.get("ai_answer"),
         search_results=search_results,
@@ -55,7 +62,14 @@ async def get_pending_hitl(job_id: str):
         search_latency_ms=hitl_data.get("search_latency_ms", 0.0),
         reason_for_web_search=hitl_data.get("reason", ""),
         requires_approval=True,
-        message="Review these web search results before generation"
+        message=hitl_data.get(
+            "message",
+            "Review retrieved citations before generation"
+            if hitl_type == "retrieval_review"
+            else "Approve web search before execution"
+            if hitl_type == "pre_web_search_review"
+            else "Review these web search results before generation"
+        )
     )
 
 

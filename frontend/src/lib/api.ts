@@ -49,10 +49,14 @@ export interface EnhancedSearchResult {
   domain: string;  // e.g., "python.org"
   word_count: number;
   retrieved_at: string;
+  source_id?: string;
+  citation?: string;
+  page?: number;
 }
 
 export interface HITLPendingData {
   job_id: string;
+  hitl_type?: "web_search_review" | "retrieval_review" | "pre_web_search_review";
   query: string;
   ai_summary?: string;
   search_results: EnhancedSearchResult[];
@@ -198,6 +202,7 @@ export function subscribeToPipelineStatus(
     bind("web_results");
     bind("reasoning_chunk");
     bind("reasoning_done");
+    bind("grader_update");
     bind("query_plan_pending");
     bind("query_plan_approved");
     bind("query_plan_rejected");

@@ -193,7 +193,7 @@ def register_all_specialists(router):
     Register all document specialists with the ingestion router.
     
     Usage:
-        from modelTest5_extensions import register_all_specialists
+        from agent_pipeline_extensions import register_all_specialists
         register_all_specialists(router)
     """
     router.register(".txt", TXTSpecialist)

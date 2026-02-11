@@ -8,6 +8,7 @@ import { CopyButton } from "./CopyButton";
 import { TypewriterText } from "./TypewriterText";
 import { QuickReplies } from "./QuickReplies";
 import { WebSearchResultsInline } from "./WebSearchResultsInline";
+import { HITLModal } from "./HITLModal";
 
 function MessageBubble({
   message,
@@ -74,7 +75,7 @@ function MessageBubble({
               }}
             />
           ) : isAssistant ? (
-            <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-violet-400 prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground">
+            <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-violet-400 prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-a:text-violet-400 hover:prose-a:text-violet-300">
               {message.isNew && !showFullText ? (
                 <TypewriterText
                   text={message.content}
@@ -168,7 +169,18 @@ function MessageBubble({
 }
 
 export function ChatHistory() {
-  const { messages, streamingAnswer, answerStreaming, activeRunId, messageActionableMap, resolvedActionMessages } = usePipelineStore();
+  const {
+    messages,
+    streamingAnswer,
+    answerStreaming,
+    activeRunId,
+    messageActionableMap,
+    resolvedActionMessages,
+    status,
+    hitlData,
+    showHITLModal,
+    graderThinking,
+  } = usePipelineStore();
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll only on message boundaries, not every streamed token.
@@ -206,11 +218,18 @@ export function ChatHistory() {
           }
         />
       ))}
+      {graderThinking.text && (status === "running" || status === "hitl_waiting") && (
+        <div className="mb-5 text-xs italic text-zinc-500">
+          <span className="mr-2 text-zinc-400">Thinking:</span>
+          <TypewriterText text={graderThinking.text} speed={2} />
+        </div>
+      )}
+      {(showHITLModal || (status === "hitl_waiting" && !!hitlData)) && <HITLModal />}
       {answerStreaming && streamingAnswer && (
         <div className="flex justify-start mb-6">
           <div className="max-w-[85%] text-left">
             <div className="text-sm leading-relaxed text-foreground">
-              <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-violet-400 prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground">
+              <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-violet-400 prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-a:text-violet-400 hover:prose-a:text-violet-300">
                 <div className="whitespace-pre-wrap break-words">{streamingAnswer}</div>
                 <span className="animate-pulse">▋</span>
               </div>

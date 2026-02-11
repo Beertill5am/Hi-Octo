@@ -44,7 +44,7 @@ class PipelineJob:
     
     # HITL state
     hitl_data: Optional[Dict[str, Any]] = None
-    hitl_event: Optional[asyncio.Event] = None
+    hitl_event: Optional[threading.Event] = None
     hitl_approved: Optional[bool] = None
     hitl_rejection_reason: Optional[str] = None  # User feedback on rejection
     # Query plan HITL state
@@ -65,7 +65,7 @@ class PipelineJob:
 
 class PipelineRunner:
     """Manages pipeline jobs and provides async interface for API."""
-    QUERY_PLAN_WAIT_TIMEOUT_S = 300.0
+    QUERY_PLAN_WAIT_TIMEOUT_S = None
     THREAD_EMIT_TIMEOUT_S = 5.0
     STREAM_EMIT_MIN_INTERVAL_S = 0.08
     STREAM_EMIT_MIN_CHARS = 48
@@ -84,10 +84,12 @@ class PipelineRunner:
             "dispatcher": "Routing",
             "expander": "Query Expansion",
             "query_plan_hitl": "Query Plan Review",
+            "retrieval_hitl": "Citation Review",
             "query_fanout": "Query Fanout",
             "search_worker": "Parallel Search",
             "deduplicator": "Deduplication",
             "grader": "Relevance Grading",
+            "web_search_intent_hitl": "Web Search Approval",
             "web_search": "Web Search",
             "hitl_approval": "Web HITL Review",
             "generate": "Answer Generation",
@@ -115,13 +117,16 @@ class PipelineRunner:
             print("🔄 Loading pipeline (this may take a moment)...")
             
             # Import pipeline components
-            from modelTest5 import (
+            from agent_pipeline import (
                 app, 
                 build_retriever, 
                 get_available_categories,
                 set_vectorstore,
                 set_query_plan_hitl_handler,
                 set_answer_token_stream_handler,
+                set_retrieval_hitl_handler,
+                set_web_hitl_handler,
+                set_grader_stream_handler,
                 SOURCE_FILES,
                 tracer
             )
@@ -138,6 +143,9 @@ class PipelineRunner:
             set_vectorstore(self._vectorstore)
             set_query_plan_hitl_handler(self._handle_query_plan_hitl)
             set_answer_token_stream_handler(self._handle_answer_token_stream)
+            set_retrieval_hitl_handler(self._handle_retrieval_hitl)
+            set_web_hitl_handler(self._handle_web_hitl)
+            set_grader_stream_handler(self._handle_grader_stream)
             
             self._pipeline_ready = True
             print(f"✅ Pipeline initialized with {len(self._categories)} categories")
@@ -158,7 +166,7 @@ class PipelineRunner:
             job_id=job_id,
             topic=topic,
             mode=mode,
-            hitl_event=asyncio.Event(),
+            hitl_event=threading.Event(),
             query_plan_event=threading.Event()
         )
         self.jobs[job_id] = job
@@ -228,6 +236,12 @@ class PipelineRunner:
                 reason = result.get("query_plan_rejection_reason") or "Query plan rejected."
                 await self._emit_event(job, "cancelled", {"reason": reason})
                 return
+            if result.get("hitl_approved") is False:
+                reason = result.get("hitl_message") or "User rejected approval checkpoint."
+                if job.status != JobStatus.CANCELLED:
+                    job.status = JobStatus.CANCELLED
+                    await self._emit_event(job, "cancelled", {"reason": reason})
+                return
             
             # Extract answer
             job.answer = result.get("answer", "No answer generated")
@@ -285,20 +299,7 @@ class PipelineRunner:
             # Do not deadlock query-plan flow if the SSE push stalls.
             pass
 
-        approved_in_time = job.query_plan_event.wait(timeout=self.QUERY_PLAN_WAIT_TIMEOUT_S)
-        if not approved_in_time:
-            reason = f"Query plan approval timed out after {int(self.QUERY_PLAN_WAIT_TIMEOUT_S)} seconds."
-            job.query_plan_approved = False
-            job.query_plan_rejection_reason = reason
-            job.status = JobStatus.CANCELLED
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._emit_event(job, "query_plan_rejected", {"reason": reason}),
-                    loop
-                ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
-            except Exception:
-                pass
-            return {"approved": False, "queries": queries, "reason": reason}
+        job.query_plan_event.wait(timeout=self.QUERY_PLAN_WAIT_TIMEOUT_S)
 
         if job.query_plan_approved:
             edited_queries = job.query_plan_edited_queries or queries
@@ -375,6 +376,161 @@ class PipelineRunner:
             self._emit_event(job, "answer_token", {"token": token_chunk, "seq": job.answer_token_seq}),
             loop
         )
+
+    def _handle_grader_stream(
+        self,
+        job_id: str,
+        text: str,
+        phase: str = "grading",
+        done: bool = False,
+        meta: Optional[Dict[str, Any]] = None
+    ):
+        """Forward sanitized grader rationale chunks to SSE."""
+        job = self.jobs.get(job_id)
+        loop = self._main_loop
+        if not job or loop is None or not text:
+            return
+
+        payload: Dict[str, Any] = {
+            "phase": phase,
+            "text": text,
+            "done": bool(done),
+        }
+        if meta:
+            payload["meta"] = meta
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._emit_event(job, "grader_update", payload),
+                loop
+            ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+        except Exception:
+            pass
+
+    def _handle_retrieval_hitl(
+        self,
+        job_id: str,
+        topic: str,
+        selected_category: str,
+        citations: list
+    ) -> Dict[str, Any]:
+        """Blocking callback for post-grader retrieval citation approval."""
+        job = self.jobs.get(job_id)
+        if not job:
+            return {"approved": True, "reason": "Job not found; auto-approved"}
+
+        job.status = JobStatus.HITL_WAITING
+        job.hitl_data = {
+            "hitl_type": "retrieval_review",
+            "job_id": job_id,
+            "query": topic,
+            "selected_category": selected_category,
+            "results": citations,
+            "search_results": citations,
+            "total_results_found": len(citations),
+            "results_shown": len(citations),
+            "search_depth": "local_rag",
+            "search_latency_ms": 0.0,
+            "reason": "Relevant local citations were found. Approve them before generation.",
+            "message": "Review retrieved citations before answer generation."
+        }
+        if job.hitl_event is None:
+            job.hitl_event = threading.Event()
+        else:
+            job.hitl_event.clear()
+
+        loop = self._main_loop
+        if loop is None:
+            return {"approved": True, "reason": "No loop; auto-approved"}
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._emit_event(job, "hitl_pending", job.hitl_data),
+                loop
+            ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+        except Exception:
+            pass
+
+        job.hitl_event.wait(timeout=self.QUERY_PLAN_WAIT_TIMEOUT_S)
+
+        if job.hitl_approved:
+            job.status = JobStatus.RUNNING
+            return {"approved": True, "reason": ""}
+
+        reason = job.hitl_rejection_reason or "User rejected retrieval citations."
+        return {"approved": False, "reason": reason}
+
+    def _handle_web_hitl(
+        self,
+        job_id: str,
+        topic: str,
+        selected_category: str,
+        phase: str = "pre_web_search",
+        results: Optional[list] = None,
+        ai_summary: str = ""
+    ) -> Dict[str, Any]:
+        """Blocking callback for web-search HITL checkpoints."""
+        job = self.jobs.get(job_id)
+        if not job:
+            return {"approved": True, "reason": "Job not found; auto-approved"}
+
+        normalized_results = results or []
+        is_pre_search = phase == "pre_web_search"
+
+        job.status = JobStatus.HITL_WAITING
+        job.hitl_data = {
+            "hitl_type": "pre_web_search_review" if is_pre_search else "web_search_review",
+            "job_id": job_id,
+            "query": topic,
+            "ai_answer": ai_summary if not is_pre_search else "",
+            "selected_category": selected_category,
+            "results": normalized_results,
+            "search_results": normalized_results,
+            "total_results_found": len(normalized_results),
+            "results_shown": len(normalized_results),
+            "search_depth": "pre_web_search" if is_pre_search else "basic",
+            "search_latency_ms": 0.0,
+            "reason": (
+                "Local retrieval exhausted after retries. "
+                "Approve to run web search."
+                if is_pre_search
+                else "Web search completed. Review results before generation."
+            ),
+            "message": (
+                "Approve web search before execution."
+                if is_pre_search
+                else "Review web search results before generation."
+            )
+        }
+        if job.hitl_event is None:
+            job.hitl_event = threading.Event()
+        else:
+            job.hitl_event.clear()
+
+        loop = self._main_loop
+        if loop is None:
+            return {"approved": True, "reason": "No loop; auto-approved"}
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._emit_event(job, "hitl_pending", job.hitl_data),
+                loop
+            ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+        except Exception:
+            pass
+
+        job.hitl_event.wait(timeout=self.QUERY_PLAN_WAIT_TIMEOUT_S)
+
+        if job.hitl_approved:
+            job.status = JobStatus.RUNNING
+            return {"approved": True, "reason": ""}
+
+        reason = job.hitl_rejection_reason or (
+            "User rejected web search execution."
+            if is_pre_search
+            else "User rejected web search results."
+        )
+        return {"approved": False, "reason": reason}
 
     async def _run_llm_job(self, job: PipelineJob):
         """Run a lightweight LLM-only response (no retrieval)."""
@@ -575,6 +731,8 @@ class PipelineRunner:
             return "Generating multiple query variants for parallel retrieval."
         if node == "query_plan_hitl":
             return "Waiting for your approval on generated search queries."
+        if node == "retrieval_hitl":
+            return "Waiting for your approval on retrieved citations."
         if node == "search_worker":
             return "Running parallel searches across query variants."
         if node == "deduplicate":
@@ -643,6 +801,8 @@ class PipelineRunner:
             return False
         
         job.hitl_approved = True
+        job.hitl_rejection_reason = None
+        job.status = JobStatus.RUNNING
         job.hitl_event.set()  # Unblock pipeline
         await self._emit_event(job, "hitl_approved", {"feedback": feedback})
         return True
@@ -686,6 +846,7 @@ class PipelineRunner:
             return False
         
         job.hitl_approved = False
+        job.hitl_rejection_reason = reason or "User rejected"
         job.status = JobStatus.CANCELLED
         job.hitl_event.set()
         await self._emit_event(job, "cancelled", {"reason": reason or "User rejected"})

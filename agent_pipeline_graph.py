@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
 
 
 import os
@@ -14,38 +13,31 @@ import json
 import markdown
 import functools
 import traceback
+from urllib.parse import urlparse
 from datetime import datetime
-import pypandoc
-from ebooklib import epub
-from markdownify import markdownify as md
-from typing import Protocol, Type, TypedDict, List, Dict, Any, Annotated, Union, Optional, Callable
-from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-from langchain_ollama import OllamaEmbeddings
+from typing import Protocol, TypedDict, List, Dict, Any, Annotated, Union, Optional, Callable
 from langchain_ollama import ChatOllama
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langgraph.graph import StateGraph, END
-from langchain_community.retrievers import BM25Retriever
-from langchain_classic.retrievers import EnsembleRetriever, ContextualCompressionRetriever
 from langgraph.types import Send
 from langchain_experimental.utilities import PythonREPL
-from flashrank import Ranker
-from langchain_community.document_compressors import FlashrankRerank
-from pydantic import BaseModel, Field, AliasChoices
-from IPython.display import Image, display, HTML
+from pydantic import BaseModel, Field
+from IPython.display import display, HTML
 
 # Import extensions for multi-format support, pre-flight analysis, and error handling
-from modelTest5_extensions import (
-    register_all_specialists,
-    preflight_analysis,
-    print_preflight_report,
+from agent_pipeline_extensions import (
     safe_llm_invoke,
     safe_json_parse,
     create_fallback_response,
     safe_code_execution,
     should_attempt_fix,
-    update_thresholds,
-    REFINEMENT_THRESHOLDS
+)
+from agent_pipeline_retrieval import (
+    router,
+    intelligent_chunking,
+    get_available_categories as _get_available_categories,
+    build_retriever as _build_retriever,
 )
 
 # Import content filter and web search
@@ -53,13 +45,11 @@ from content_filter import UniversalContentFilter, create_guardrail_node, route_
 from web_search_agent import WebSearchAgent, create_web_search_node
 
 
-# In[ ]:
 
 
 OLLAMA_API_KEY = os.environ["OLLAMA_API_KEY"] 
 
 
-# In[3]:
 
 
 DB_PATH = "./agent_knowledge_db"
@@ -70,7 +60,6 @@ SOURCE_FILES = ["books/think_python_how_to_think_like_a_computer_scientist.epub"
                "books/python_dataTypes.md"]
 
 
-# In[4]:
 
 
 def display_model_thoughts(thought_content):
@@ -134,7 +123,244 @@ def display_model_thoughts(thought_content):
     """))
 
 
-# In[5]:
+def sanitize_public_reasoning(text: str, max_chars: int = 1200) -> str:
+    """
+    Prepare a safe, compact rationale stream for UI transparency.
+    We avoid exposing hidden/internal thinking tags verbatim.
+    """
+    if not text:
+        return ""
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    lines = [re.sub(r"\s+", " ", line).strip() for line in cleaned.splitlines()]
+    cleaned = "\n".join([line for line in lines if line])
+    return cleaned[:max_chars]
+
+
+def chunk_text_for_stream(text: str, chunk_size: int = 180) -> List[str]:
+    """Split rationale into readable chunks for incremental UI streaming."""
+    if not text:
+        return []
+    words = text.split(" ")
+    chunks: List[str] = []
+    current = ""
+    for w in words:
+        candidate = f"{current} {w}".strip()
+        if len(candidate) <= chunk_size:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        current = w
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _compute_evidence_id(doc: Document) -> str:
+    """Deterministic evidence id for a retrieved chunk."""
+    metadata = doc.metadata or {}
+    source = str(metadata.get("source") or metadata.get("title") or "")
+    page_raw = metadata.get("page")
+    page_val = str(page_raw) if page_raw is not None else ""
+    raw = f"{source}|{page_val}|{doc.page_content or ''}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f"evi_{digest}"
+
+
+def _build_evidence_records(docs: List[Document]) -> List[Dict[str, Any]]:
+    """Build canonical evidence records with stable ids and clean display labels."""
+    records: List[Dict[str, Any]] = []
+    for i, doc in enumerate(docs):
+        metadata = doc.metadata or {}
+        source = str(metadata.get("source") or metadata.get("title") or "Unknown source")
+        source_url = str(metadata.get("source_url") or "")
+        page_raw = metadata.get("page")
+        page_num = (page_raw + 1) if isinstance(page_raw, int) else None
+        snippet = " ".join((doc.page_content or "").split())[:360]
+        full_content = (doc.page_content or "")[:1200]
+        score = metadata.get("score", metadata.get("relevance_score", 0.8))
+        try:
+            relevance_score = float(score)
+        except Exception:
+            relevance_score = 0.8
+        relevance_score = max(0.0, min(1.0, relevance_score))
+
+        domain = ""
+        if source_url:
+            try:
+                domain = urlparse(source_url).netloc
+            except Exception:
+                domain = ""
+        if not domain:
+            domain = "local-doc"
+
+        display_index = i + 1
+        records.append({
+            "evidence_id": _compute_evidence_id(doc),
+            "display_index": display_index,
+            "display_id": f"Source #{display_index}",
+            "title": source,
+            "url": source_url or "",
+            "snippet": snippet,
+            "citation": snippet[:200],
+            "page": page_num,
+            "full_content": full_content,
+            "relevance_score": relevance_score,
+            "domain": domain,
+            "word_count": len((doc.page_content or "").split()),
+            "retrieved_at": datetime.now().isoformat(),
+            "page_content": doc.page_content or "",
+        })
+    return records
+
+
+def _extract_source_refs(text: str) -> List[str]:
+    """Extract display ids (e.g., Source #3) from arbitrary model text."""
+    if not text:
+        return []
+    refs = re.findall(r"\bSource\s*#\s*(\d+)\b", text, flags=re.IGNORECASE)
+    return [f"Source #{int(ref)}" for ref in refs]
+
+
+def _filter_reasoning_by_verified_sources(text: str, verified_sources: set[str]) -> str:
+    """
+    Drop lines that reference unverified sources.
+    If a line references sources, all referenced sources must be verified.
+    """
+    if not text:
+        return ""
+    if not verified_sources:
+        return ""
+    kept: List[str] = []
+    for line in text.splitlines():
+        refs = _extract_source_refs(line)
+        if not refs:
+            kept.append(line)
+            continue
+        if all(ref in verified_sources for ref in refs):
+            kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _filter_summary_lines_by_sources(text: str, allowed_sources: set[str]) -> str:
+    """
+    Keep only lines whose cited Source #N labels are present in allowed_sources.
+    Lines with no citations are kept only if they are non-claim metadata (e.g., Coverage).
+    """
+    if not text:
+        return ""
+    kept: List[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        refs = _extract_source_refs(stripped)
+        if refs:
+            if all(ref in allowed_sources for ref in refs):
+                kept.append(stripped)
+            continue
+        if stripped.lower().startswith("coverage:"):
+            kept.append(stripped)
+    return "\n".join(kept).strip()
+
+
+def _normalize_binary_score(value: Any) -> str:
+    """Normalize model grader outputs to strict yes/no."""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return "yes" if float(value) > 0 else "no"
+    text = str(value or "").strip().lower()
+    if text in {"yes", "y", "true", "1", "relevant"}:
+        return "yes"
+    if text in {"no", "n", "false", "0", "irrelevant"}:
+        return "no"
+    return "no"
+
+
+def _normalize_web_result_item(item: Any) -> Dict[str, Any]:
+    """Normalize web search result object/dict for HITL rendering."""
+    if isinstance(item, dict):
+        title = item.get("title", "Untitled")
+        url = item.get("url", "")
+        snippet = item.get("snippet") or item.get("content") or ""
+        full_content = item.get("full_content") or item.get("raw_content") or snippet
+        score = item.get("relevance_score", item.get("score", 0.0))
+        domain = item.get("domain", "")
+        retrieved_at = item.get("retrieved_at", item.get("timestamp", ""))
+    else:
+        title = getattr(item, "title", "Untitled")
+        url = getattr(item, "url", "")
+        snippet = getattr(item, "snippet", "") or getattr(item, "content", "")
+        full_content = getattr(item, "full_content", "") or getattr(item, "raw_content", "") or snippet
+        score = getattr(item, "relevance_score", None)
+        if score is None:
+            score = getattr(item, "score", 0.0)
+        domain = getattr(item, "domain", "")
+        retrieved_at = getattr(item, "retrieved_at", "") or getattr(item, "timestamp", "")
+
+    try:
+        relevance_score = float(score)
+    except Exception:
+        relevance_score = 0.0
+    relevance_score = max(0.0, min(1.0, relevance_score))
+
+    if not domain and url:
+        try:
+            domain = urlparse(url).netloc
+        except Exception:
+            domain = ""
+
+    snippet = str(snippet or "")
+    full_content = str(full_content or snippet)
+    return {
+        "title": str(title or "Untitled"),
+        "url": str(url or ""),
+        "snippet": snippet[:320],
+        "full_content": full_content[:5000],
+        "relevance_score": relevance_score,
+        "domain": str(domain or ""),
+        "word_count": len(full_content.split()),
+        "retrieved_at": str(retrieved_at or datetime.now().isoformat()),
+    }
+
+
+def _summarize_web_results_for_hitl(
+    topic: str,
+    results: List[Dict[str, Any]],
+    fallback_summary: str = ""
+) -> str:
+    """Generate a concise web-results summary with Source #N citations."""
+    if not results:
+        return fallback_summary or ""
+
+    evidence_lines: List[str] = []
+    for idx, item in enumerate(results[:8], start=1):
+        evidence_lines.append(
+            f"[Source #{idx}] Title: {item.get('title', '')}\n"
+            f"Snippet: {item.get('snippet', '')}\n"
+            f"URL: {item.get('url', '')}"
+        )
+    evidence_blob = "\n\n".join(evidence_lines)
+    llm = ChatOllama(model="qwen3:8b", temperature=0.1, num_ctx=8192, additional_kwargs={"think": False})
+    prompt = f"""
+    You are preparing a short review summary before answer generation.
+    User topic: {topic}
+
+    Web evidence:
+    {evidence_blob}
+
+    Requirements:
+    1. Write 3-5 concise bullet points.
+    2. Every bullet must include at least one citation label like [Source #2].
+    3. Only use evidence provided above.
+    4. End with one short line: "Coverage: ...".
+    """
+    try:
+        text = llm.invoke(prompt).content
+        return str(text or "").strip()[:1800]
+    except Exception:
+        return (fallback_summary or "").strip()[:1800]
+
+
 
 
 class AdvancedTraceLogger:
@@ -235,520 +461,35 @@ def traceable(func):
     return wrapper
 
 
-# In[6]:
-
-
 def extract_json(text: str) -> str:
     """Finds the first JSON object or array in a string."""
     match = re.search(r'\{.*\}', text, re.DOTALL)
     return match.group(0) if match else text
 
 
-# In[7]:
-
-
-def calculate_file_hash(file_path: str):
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        # Read in blocks to handle large files efficiently
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
-
-
-# In[8]:
-
-
-# 1. The Interface: All future specialists MUST follow this contract
-class DocumentSpecialist(Protocol):
-    def convert(self, file_path: str) -> str:
-        """
-        Reads a file and returns its content as Structured Markdown.
-        """
-        ...
-
-# 2. The Router: Manages traffic based on file extensions
-class IngestionRouter:
-    def __init__(self):
-        # Maps extension (e.g., .pdf) to a Specialist Class
-        self._specialists: Dict[str, Type[DocumentSpecialist]] = {}
-
-    def register(self, extension: str, specialist: Type[DocumentSpecialist]):
-        """Connects a file extension to a specific handler class."""
-        self._specialists[extension.lower()] = specialist
-        print(f"✅ Registered specialist for: {extension}")
-
-    def route(self, file_path: str) -> str:
-        """Detects extension and calls the right specialist."""
-        ext = os.path.splitext(file_path)[1].lower()
-        specialist_cls = self._specialists.get(ext)
-
-        if not specialist_cls:
-            raise ValueError(f"❌ No specialist found for extension: {ext}")
-
-        print(f"🔄 Routing '{os.path.basename(file_path)}' to {specialist_cls.__name__}...")
-
-        # Instantiate and run the specialist
-        return specialist_cls().convert(file_path)
-
-# Initialize the global router
-router = IngestionRouter()
-
-
-# In[9]:
-
-
-class EPUBSpecialist:
-    def _wrap_metadata(self, content: str, title: str, author: str, source: str, ftype: str) -> str:
-        """Standardizes the output format with YAML frontmatter."""
-        title = title if title else "Unknown"
-        author = author if author else "Unknown"
-        return f"""---
-            title: "{title}"
-            author: "{author}"
-            source: "{source}"
-            type: "{ftype}"
-            ---
-
-            {content}
-            """
-    def convert(self, file_path: str) -> str:
-        print(f"📘 Pandoc: Converting '{os.path.basename(file_path)}'...")
-
-        try:
-            # 1. Metadata Extraction 
-            book = epub.read_epub(file_path)
-            title = book.get_metadata('DC', 'title')[0][0] if book.get_metadata('DC', 'title') else "Unknown"
-            author = book.get_metadata('DC', 'creator')[0][0] if book.get_metadata('DC', 'creator') else "Unknown"
-
-            # 2. Structural Conversion (via pypandoc)
-            content = pypandoc.convert_file(
-                file_path, 
-                'markdown',
-                format='epub', 
-               extra_args=[
-                    '--markdown-headings=atx', 
-                    '--wrap=none'
-                ]
-            )
-
-            content = self._sanitize_content(content)
-
-            # 3. Standardization
-            return self._wrap_metadata(content, title, author, file_path, "epub")
-
-        except OSError:
-            return "❌ Error: Pandoc not found. Please install the system binary."
-        except Exception as e:
-            return f"❌ EPUB Error: {e}"
-
-    def _sanitize_content(self, text: str) -> str:
-        """
-        Removes Pandoc artifacts, images, and empty anchors.
-        """
-        # 1. Remove Fenced Divs 
-        text = re.sub(r'^:{3,}.*$', '', text, flags=re.MULTILINE)
-
-        # 2. Smart Unwrapping
-        text = re.sub(r'\[(.*?)\]\{[.#][^}]+\}', r'\1', text)
-
-        # 3. Cleanup Straggler Attributes
-        text = re.sub(r'\{[.#][^}]+\}', '', text)
-
-        # 4. Remove residual empty brackets 
-        text = re.sub(r'\[\]', '', text)
-
-        # 5. Remove Images
-        text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
-
-        # 6. Remove HTML tags
-        text = re.sub(r'<[^>]+>', '', text)
-
-        # 7. Collapse excessive whitespace
-        text = re.sub(r'\n{3,}', '\n\n', text)
-
-        return text.strip()
-router.register(".epub", EPUBSpecialist)
-
-# Register all additional document specialists (TXT, MD, DOCX, PDF)
-register_all_specialists(router)
-
-
-# In[10]:
-
-
-class VerboseFlashrank(FlashrankRerank):
-    def compress_documents(self, documents: List[Document], query: str, callbacks=None) -> List[Document]:
-        # 1. Print Input Count
-        print(f"\n👀 RERANKER INPUT: Received {len(documents)} documents from the Ensemble Retriever.")
-
-        # 2. Run the actual Flashrank logic
-        start = time.time()
-        results = super().compress_documents(documents, query, callbacks)
-        end = time.time()
-
-        # 3. Print Output Count
-        print(f"📉 RERANKER OUTPUT: Keeping top {len(results)} documents (Took {end-start:.2f}s).")
-        return results
-
-
-# In[11]:
-
-
-def intelligent_chunking(markdown_text: str):
-    print("✂️ Splitting document by logical headers...")
-
-    # 1. Define the Hierarchy
-    # We tell the splitter to look for these specific Markdown patterns
-    headers_to_split_on = [
-        ("#", "Header 1"),     
-        ("##", "Header 2"),     
-        ("###", "Header 3"),    
-    ]
-
-    # 2. First Pass: Logical Splitting
-    markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
-    md_header_splits = markdown_splitter.split_text(markdown_text)
-
-    # 3. Second Pass: Size Constraints
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000, 
-        chunk_overlap=200
-    )
-
-    # Split the logical chunks into manageable vector-sized bits
-    final_splits = text_splitter.split_documents(md_header_splits)
-
-    print(f"   ✅ Created {len(final_splits)} semantic chunks.")
-    return final_splits
-
-
-# In[12]:
-
-
-def needs_refinement_heuristic(text: str) -> bool:
-    """
-    Pattern: Routing (Chapter 2) & Resource-Aware Optimization (Chapter 16)
-    Deterministic check to filter out chunks that clearly don't need AI attention.
-    Returns True if the chunk looks ambiguous and needs LLM review.
-    """
-    # 1. Noise Filter: Skip very short chunks
-    if len(text) < 50:
-        return False
-
-    # 2. Ambiguity Detector
-    ambiguous_starts = [
-        r"^(It|This|That|They|These|Those|He|She)\s+[a-z]", 
-        r"^(However|But|Also|Furthermore),\s+(it|this|they)",
-        r"^In\s+contrast,\s+(it|this|they)"
-    ]
-
-    for pattern in ambiguous_starts:
-        if re.match(pattern, text, re.IGNORECASE):
-            return True
-
-    return False
-
-
-# In[13]:
-
-
-def create_refinement_batches(splits: List[Document], batch_size: int = 5) -> List[Dict]:
-    """
-    Pattern: Resource-Aware Optimization
-    Groups chunks into batches to minimize LLM calls.
-
-    Args:
-        splits: The list of document chunks.
-        batch_size: Number of chunks to process in one LLM call.
-
-    Returns:
-        A list of batch dictionaries containing formatted text and metadata.
-    """
-    batches = []
-
-    # Iterate through splits in steps of 'batch_size'
-    for i in range(0, len(splits), batch_size):
-        batch_splits = splits[i : i + batch_size]
-
-        # 1. Format the batch for the LLM
-        formatted_text = ""
-        batch_metadata = []
-
-        for idx, split in enumerate(batch_splits):
-            # Check our heuristic from Step 1
-            needs_check = needs_refinement_heuristic(split.page_content)
-
-            # We flag it visually for the LLM, but we send the whole batch 
-            # so the LLM has context to fix the specific ambiguous ones.
-            flag = "[POTENTIAL_AMBIGUITY]" if needs_check else ""
-
-            formatted_text += f"ID: {idx}\nCONTENT: {split.page_content}\n{flag}\n-----------------\n"
-
-            # Keep track of original objects to update them later
-            batch_metadata.append({
-                "original_index": i + idx,
-                "needs_heuristic_check": needs_check
-            })
-
-        batches.append({
-            "formatted_text": formatted_text,
-            "metadata": batch_metadata,
-            "raw_splits": batch_splits
-        })
-
-    print(f"   📦 Grouped {len(splits)} chunks into {len(batches)} batches for efficient processing.")
-    return batches
-
-
-# In[14]:
-
-
-class BatchCorrection(BaseModel):
-    """
-    Pattern: Structured Output
-    Captures only the necessary changes. Keys are the IDs from the batch.
-    """
-    corrections: Dict[int, str] = Field(
-        description="Map of ID to the REWRITTEN text. Only include chunks that needed fixing."
-    )
-
-def process_batch_with_llm(batch: Dict) -> Dict[int, str]:
-    """
-    Pattern: Listwise Evaluation (Chapter 19) & Model Specialization (Chapter 16)
-    1. Heuristic Gatekeeper: Fast exit if no potential ambiguity.
-    2. Reviewer (DeepSeek): Reasons about context and proposes fixes.
-    3. Formatter (Qwen): structured output extraction.
-    """
-    # 1. Heuristic Gatekeeper
-    if not any(item['needs_heuristic_check'] for item in batch['metadata']):
-        return {}
-
-    # 2. Reviewer Agent
-    #llm_reviewer = ChatOllama(model="deepseek-r1:8b", temperature=0.1, num_ctx=8192)
-    llm_reviewer = ChatOllama(model="deepseek-v3.1:671b-cloud", temperature=0.2, num_ctx=64000)
-
-    review_prompt = f"""
-    You are a Technical Editor. Review the text chunks.
-    [INPUT]: {batch['formatted_text']}
-
-    [TASK]:
-    Identify chunks starting with ambiguous pronouns referring to previous chunks.
-
-    [OUTPUT]:
-    - If a chunk needs fixing, write: "ID: <id> REWRITE: <new_text>"
-    - If NO chunks need fixing, write: "NO CHANGES NEEDED."
-    """
-
-    # Run the reasoning step with safe invoke
-    response = safe_llm_invoke(
-        llm_reviewer, 
-        review_prompt,
-        max_retries=2,
-        fallback_value=create_fallback_response("NO CHANGES NEEDED"),
-        operation_name="Batch Review"
-    )
-    raw_analysis = response.content if response else "NO CHANGES NEEDED"
-
-    # Visualize the editor's thought process
-    display_model_thoughts(raw_analysis)
-
-    if "NO CHANGES NEEDED" in raw_analysis.upper() or "NO CHUNKS NEED" in raw_analysis.upper():
-        return {}
-
-    # 3. Formatter Agent
-    llm_formatter = ChatOllama(model="qwen3-coder:480b-cloud", format="json", temperature=0.1, num_ctx=64000)
-
-    format_prompt = f"""
-    You are a JSON Extractor. Extract the ID and REWRITE pairs from the text below.
-
-    [TEXT]:
-    {raw_analysis}
-
-    [JSON SCHEMA]:
-    Return a JSON object with a single key "corrections".
-    Example: {{ "corrections": {{ "1": "Python is dynamic", "4": "The loop ends" }} }}
-    """
-
-    try:
-        # Invoke Formatting
-        response = llm_formatter.invoke(format_prompt).content
-
-        # Parse output using Pydantic
-        result = BatchCorrection.model_validate_json(extract_json(response))
-        return result.corrections
-
-    except Exception as e:
-        print(f"      ⚠️ Batch processing warning: {e}. Skipping refinements for this batch.")
-        return {}
-
-
-# In[15]:
-
-
 def get_available_categories(vectorstore: Chroma) -> List[str]:
-    """
-    Pattern: Agent Discovery (Chapter 15)
-    Dynamically identifies what knowledge domains exist in the DB.
-    """
-    # Fetch only metadata to be efficient
-    data = vectorstore.get(include=["metadatas"])
-
-    # Extract unique categories using a set
-    categories = set()
-    for meta in data["metadatas"]:
-        if meta and "category" in meta:
-            categories.add(meta["category"])
-
-    return list(categories)
-
-
-# In[ ]:
+    """Backward-compatible facade for retrieval category discovery."""
+    return _get_available_categories(vectorstore)
 
 
 def build_retriever(file_paths: List[str], category: str, force_skip_refinement: bool = False):
-    print(f"--- 📂 Knowledge Base: {DB_PATH} ---")
-
-    # 1. Initialize VectorDB (Connect to persistent storage)
-    embeddings = OllamaEmbeddings(model="nomic-embed-text:latest")
-    vectorstore = Chroma(
-        persist_directory=DB_PATH,
-        embedding_function=embeddings,
-        collection_name="python_knowledge_base_v2" 
+    """Backward-compatible facade for retriever construction + ingestion."""
+    return _build_retriever(
+        file_paths=file_paths,
+        category=category,
+        db_path=DB_PATH,
+        force_skip_refinement=force_skip_refinement,
+        display_callback=display_model_thoughts,
     )
-
-    # 2. Resource-Aware Check: What do we actually need to do?
-    # We fetch only metadata to be fast
-    existing_data = vectorstore.get(include=['metadatas'])
-
-    # Create a set of existing file hashes for O(1) lookups
-    existing_hashes = {
-        m.get('file_hash') for m in existing_data['metadatas'] 
-        if m and 'file_hash' in m
-    }
-
-    # Identify which files are actually new
-    files_to_ingest = []
-    for path in file_paths:
-        if not os.path.exists(path):
-            print(f"   ⚠️ Warning: Source file not found: {path}")
-            continue
-
-        current_hash = calculate_file_hash(path)
-        if current_hash not in existing_hashes:
-            files_to_ingest.append((path, current_hash))
-
-    # 3. The "Fast Path" 
-    if not files_to_ingest:
-        print("   ✅ Database is fully synchronized. Skipping ingestion.")
-    else:
-        # 4. Perform Ingestion only for new files
-        print(f"   🔄 Detected {len(files_to_ingest)} new/modified documents. Starting ingestion...")
-
-        for path, file_hash in files_to_ingest:
-            try:
-                # Routing & Splitting
-                markdown_content = router.route(path)
-                splits = intelligent_chunking(markdown_content)
-
-                # NEW: Pre-flight Analysis
-                preflight = preflight_analysis(splits)
-                print_preflight_report(preflight)
-                
-                # Determine if we should skip refinement
-                skip_refinement = force_skip_refinement or preflight["skip_refinement"]
-                
-                if skip_refinement:
-                    print(f"      ⚡ FAST MODE: Skipping LLM refinement")
-                else:
-                    # Listwise Reflection 
-                    print(f"      🧠 Optimizing {len(splits)} chunks for '{os.path.basename(path)}'...")
-                    batches = create_refinement_batches(splits, batch_size=10) 
-
-                    for batch in batches:
-                        try:
-                            corrections = process_batch_with_llm(batch)
-                            for local_id, new_text in corrections.items():
-                                if local_id < len(batch['metadata']):
-                                    meta = batch['metadata'][local_id]
-                                    global_idx = meta['original_index']
-                                    splits[global_idx].page_content = new_text
-                                    splits[global_idx].metadata["is_refined"] = True
-                        except Exception as batch_error:
-                            print(f"      ⚠️ Batch failed: {batch_error}. Continuing...")
-                            continue
-
-                # Enrichment
-                for split in splits:
-                    if "raw_content" not in split.metadata:
-                        split.metadata["raw_content"] = split.page_content
-
-                    split.metadata["file_hash"] = file_hash
-                    split.metadata["category"] = category
-                    split.metadata["ingested_at"] = datetime.now().isoformat()
-                    split.metadata["source"] = os.path.basename(path)
-
-                # Indexing
-                vectorstore.add_documents(splits)
-                print(f"      ✅ Ingested '{os.path.basename(path)}'.")
-
-            except Exception as e:
-                print(f"      ❌ Failed to process '{path}': {e}")
-
-    # 5. Pipeline Configuration 
-    print("--- ⚙️ Configuring Hybrid RAG Pipeline ---")
-
-    # Fetch docs for BM25 
-    all_docs = vectorstore.get(where={"category": category}, include=['documents', 'metadatas'])
-
-    if not all_docs['documents']:
-        print("   ⚠️ Warning: DB is empty. Returning basic retriever.")
-        return vectorstore.as_retriever()
-
-    # Reconstruct Document objects for LangChain
-    documents = [
-        Document(page_content=doc, metadata=meta) 
-        for doc, meta in zip(all_docs['documents'], all_docs['metadatas'])
-    ]
-
-    # Semantic Retriever 
-    semantic_retriever = vectorstore.as_retriever(
-        search_type="mmr", 
-        search_kwargs={'k': 10, 'fetch_k': 30, 'filter': {'category': category}}
-    )
-
-    # Keyword Retriever 
-    keyword_retriever = BM25Retriever.from_documents(documents)
-    keyword_retriever.k = 10
-
-    # Hybrid Ensemble
-    ensemble_retriever = EnsembleRetriever(
-        retrievers=[keyword_retriever, semantic_retriever],
-        weights=[0.3, 0.7] 
-    )
-
-    # Reranker 
-    compressor = VerboseFlashrank(
-        model="ms-marco-MiniLM-L-12-v2", 
-        top_n=10 
-    )
-
-    final_retriever = ContextualCompressionRetriever(
-        base_compressor=compressor, 
-        base_retriever=ensemble_retriever
-    )
-
-    return final_retriever, vectorstore
-
-
-# In[17]:
 
 
 class AgentState(TypedDict):
     topic: str
     job_id: str
     queries: List[str]
-    documents: Annotated[List[Document], operator.add]
+    worker_documents: Annotated[List[Document], operator.add]
+    documents: List[Document]
+    evidence: List[Dict[str, Any]]
     is_relevant: bool
     available_categories: List[str]  
     selected_category: str           
@@ -772,6 +513,7 @@ class AgentState(TypedDict):
     query_plan_approved: bool
     query_plan_message: str
     query_plan_rejection_reason: str
+    graded_citations: List[Dict[str, Any]]
 
 
 def _chunk_to_text(chunk: Any) -> str:
@@ -841,7 +583,6 @@ def _stream_writer_answer(llm_writer: ChatOllama, instruction: str, job_id: str)
     return final_answer
 
 
-# In[18]:
 
 
 class CritiqueResponse(BaseModel):
@@ -855,7 +596,6 @@ class CritiqueResponse(BaseModel):
     accepted: bool = Field(description="True if score >= 8, else False")
 
 
-# In[19]:
 
 
 # A simple schema for the input to our worker node
@@ -880,11 +620,10 @@ def search_worker_node(request: SearchRequest):
         filter={"category": category}
     )
 
-    # Return directly to the global state 'documents' key
-    return {"documents": results}
+    # Fanout accumulator key. Canonical documents are set by deduplicate_node.
+    return {"worker_documents": results}
 
 
-# In[20]:
 
 
 def map_queries_node(state: AgentState):
@@ -969,17 +708,17 @@ def route_from_query_plan_hitl(state: AgentState) -> str:
 
 def query_fanout_node(state: AgentState):
     """No-op node to attach dynamic fanout mapping after query-plan HITL."""
-    return {}
+    # Reset retrieval artifacts before each fanout cycle to avoid stale leakage.
+    return {"worker_documents": [], "documents": [], "evidence": [], "graded_citations": []}
 
 
-# In[21]:
 
 
 def deduplicate_node(state: AgentState):
     """
     Reduce step: Cleans up the messy parallel results.
     """
-    raw_docs = state['documents']
+    raw_docs = state.get('worker_documents', [])
     unique_contents = set()
     unique_docs = []
 
@@ -989,11 +728,11 @@ def deduplicate_node(state: AgentState):
             unique_docs.append(doc)
 
     print(f"    ✅ Merged & Deduplicated: {len(unique_docs)} unique docs (from {len(raw_docs)} total).")
-    # We overwrite the list with the clean version
-    return {"documents": unique_docs}
+    evidence_records = _build_evidence_records(unique_docs)
+    # Canonical snapshot for this attempt only.
+    return {"documents": unique_docs, "worker_documents": [], "evidence": evidence_records}
 
 
-# In[22]:
 
 
 def increment_retry_node(state: AgentState):
@@ -1001,7 +740,6 @@ def increment_retry_node(state: AgentState):
     return {"retry_count": state.get('retry_count', 0) + 1} 
 
 
-# In[23]:
 
 
 class RouteDecision(BaseModel):
@@ -1060,7 +798,6 @@ def dispatcher_node(state: AgentState):
     return {"selected_category": selected}
 
 
-# In[24]:
 
 
 def expand_query_node(state: AgentState):
@@ -1128,7 +865,6 @@ def expand_query_node(state: AgentState):
     return {"queries": final_queries}
 
 
-# In[25]:
 
 
 def retrieve_node(state: AgentState):
@@ -1172,7 +908,6 @@ def retrieve_node(state: AgentState):
     return {"documents": unique_docs}
 
 
-# In[26]:
 
 
 def grade_documents_node(state: AgentState):
@@ -1183,21 +918,26 @@ def grade_documents_node(state: AgentState):
     """
     print("--- ⚖️ Grader: Verifying relevance (Dual-Model) ---")
     topic = state['topic']
-    docs = state['documents']
+    docs = state.get('documents', [])
+    evidence = state.get('evidence', []) or _build_evidence_records(docs)
 
     # Context Enrichment
     doc_txt_list = []
-    for i, doc in enumerate(docs):
-        # specific source info
-        source = doc.metadata.get('source', 'Unknown')
-        page = doc.metadata.get('page', 0) + 1
+    for item in evidence:
+        source = item.get("title", "Unknown")
+        page = item.get("page")
+        page_text = page if page is not None else "Unknown"
+        display_id = item.get("display_id", "")
+        stable_id = item.get("evidence_id", "")
+        content = item.get("page_content", "")
 
         # The stamped format the LLM will see
         entry = f"""
-        [SOURCE ID: {i+1}]
+        [{display_id}]
+        Stable ID: {stable_id}
         File: {source}
-        Page: {page}
-        Content: {doc.page_content}
+        Page: {page_text}
+        Content: {content}
         -------------------------------------------
         """
         doc_txt_list.append(entry)
@@ -1207,7 +947,8 @@ def grade_documents_node(state: AgentState):
 
     # 1. Define Schema
     class Grade(BaseModel):
-        binary_score: str = Field(description="Relevance score 'yes' or 'no'")
+        binary_score: Union[str, int, float, bool] = Field(description="Relevance score convertible to yes/no")
+        cited_sources: List[str] = Field(default_factory=list, description="List of cited source labels like 'Source #1'")
 
     # 2. Reasoning (DeepSeek-R1)
     llm_reasoning = ChatOllama(model="deepseek-r1:8b", temperature=0.1, num_ctx=8192)
@@ -1218,40 +959,85 @@ def grade_documents_node(state: AgentState):
 
     Task: 
     1. Analyze if the snippets contain a definition or explanation of the topic.
-    2. If relevant, YOU MUST CITE the 'SOURCE ID' and 'File Name' that proves it.
+    2. If relevant, YOU MUST CITE source labels exactly in this format: Source #N.
     3. Ignore bibliographies or random, unrelated code.
     4. Think step-by-step: Does this content explicitly address '{topic}'?
     """
-
     reasoning_content = llm_reasoning.invoke(prompt_reasoning).content
-    display_model_thoughts(reasoning_content) 
+    display_model_thoughts(reasoning_content)
 
     # 3. Formatting (Qwen)
     llm_formatter = ChatOllama(model="qwen3:8b", format="json", temperature=0.2, num_ctx=8192, 
                                additional_kwargs={"think": False})
 
     prompt_formatting = [
-        {"role": "system", "content": "You are a grader. Output JSON with key 'binary_score' set to 'yes' or 'no'."},
+        {"role": "system", "content": "You are a grader. Output JSON with keys 'binary_score' and 'cited_sources'. 'cited_sources' must be an array of labels like 'Source #1'."},
         {"role": "user", "content": f"Based on this analysis, is the content relevant?\n\nAnalysis: {reasoning_content}"}
     ]
 
+    verified_display_ids: List[str] = []
+    verified_citations: List[Dict[str, Any]] = []
     try:
         result = llm_formatter.invoke(prompt_formatting).content
         grade = Grade.model_validate_json(extract_json(result))
-        is_relevant = grade.binary_score.lower() == "yes"
+        normalized_score = _normalize_binary_score(grade.binary_score)
+        is_relevant = normalized_score == "yes"
+        allowed_display_ids = {item.get("display_id", "") for item in evidence}
+        proposed_ids = list(dict.fromkeys(_extract_source_refs(" ".join(grade.cited_sources))))
+        verified_display_ids = [sid for sid in proposed_ids if sid in allowed_display_ids]
+        verified_citations = _build_retrieval_citations(evidence, set(verified_display_ids))
+        if is_relevant and not verified_citations:
+            # Prevent mismatch: relevance without any verified citation is treated as not relevant.
+            is_relevant = False
     except Exception as e:
         print(f"❌ Grading format failed: {e}. Defaulting to 'no'.")
         is_relevant = False
+        verified_display_ids = []
+        verified_citations = []
+
+    # Stream sanitized, citation-validated grader rationale to UI.
+    if grader_stream_handler is not None:
+        try:
+            public_reasoning = sanitize_public_reasoning(reasoning_content)
+            public_reasoning = _filter_reasoning_by_verified_sources(public_reasoning, set(verified_display_ids))
+            if not public_reasoning and is_relevant:
+                public_reasoning = "Relevant evidence validated."
+            for idx, chunk in enumerate(chunk_text_for_stream(public_reasoning), start=1):
+                grader_stream_handler(
+                    job_id=state.get("job_id", ""),
+                    text=chunk,
+                    phase="grading",
+                    done=False,
+                    meta={"chunk": idx}
+                )
+        except Exception as e:
+            print(f"   ⚠️ Grader stream warning: {e}")
 
     if is_relevant:
         print("   ✅ Grader: Content is RELEVANT.")
     else:
         print("   ⛔ Grader: Content is IRRELEVANT.")
 
-    return {"is_relevant": is_relevant}
+    if grader_stream_handler is not None:
+        try:
+            grader_stream_handler(
+                job_id=state.get("job_id", ""),
+                text=f"Decision: {'Relevant' if is_relevant else 'Not relevant'}.",
+                phase="grading",
+                done=True,
+                meta={
+                    "is_relevant": is_relevant,
+                    "docs_total": len(docs),
+                    "verified_source_ids": verified_display_ids,
+                    "verified_citations": verified_citations,
+                }
+            )
+        except Exception as e:
+            print(f"   ⚠️ Grader final stream warning: {e}")
+
+    return {"is_relevant": is_relevant, "graded_citations": verified_citations, "evidence": evidence}
 
 
-# In[27]:
 
 
 def generate_answer_node(state: AgentState):
@@ -1405,7 +1191,6 @@ def generate_answer_node(state: AgentState):
     }
 
 
-# In[28]:
 
 
 def route_from_dispatcher(state: AgentState):
@@ -1442,22 +1227,20 @@ def route_from_grader_with_web(state: AgentState):
     web_search_performed = state.get('web_search_performed', False)
 
     if is_relevant:
-        return "generate"
+        return "retrieval_hitl"
     elif retries < 2:
         # First 2 retries: try local RAG again
         return "increment_retry"
     elif not web_search_performed:
-        # After 2 retries: try web search before giving up
-        print("   🌐 Local RAG exhausted. Falling back to web search...")
-        return "web_search"
+        # After 2 retries: ask user approval before web search.
+        print("   🌐 Local RAG exhausted. Requesting approval before web search...")
+        return "web_search_intent_hitl"
     else:
         # Web search also failed - graceful exit
         return "end_node"
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # HITL APPROVAL NODE (Stub for Frontend Integration)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def hitl_approval_node(state: AgentState):
     """
@@ -1475,6 +1258,18 @@ def hitl_approval_node(state: AgentState):
     
     web_results = state.get('web_search_results', [])
     web_answer = state.get('web_search_answer', None)
+    normalized_results = []
+    for idx, result in enumerate((web_results or []), start=1):
+        item = _normalize_web_result_item(result)
+        item["source_id"] = f"Source #{idx}"
+        normalized_results.append(item)
+    ai_summary = _summarize_web_results_for_hitl(
+        topic=state.get("topic", ""),
+        results=normalized_results,
+        fallback_summary=str(web_answer or "")
+    )
+    allowed_sources = {item.get("source_id", "") for item in normalized_results}
+    ai_summary = _filter_summary_lines_by_sources(ai_summary, allowed_sources)
     
     # Display what we found (for observability)
     if web_answer:
@@ -1493,21 +1288,76 @@ def hitl_approval_node(state: AgentState):
     # STUB: Auto-approve for now
     # In production, this would pause and wait for frontend callback
     # ═══════════════════════════════════════════════════════════════════════════
-    user_approved = True  # TODO: Replace with actual HITL mechanism
-    
-    if user_approved:
-        print("   ✅ [STUB] Auto-approved. Proceeding to generation...")
+    if web_hitl_handler is None:
+        print("   No web HITL handler configured. Auto-approving post-search checkpoint.")
         return {
             "hitl_approved": True,
-            "hitl_message": "Auto-approved (stub mode)"
+            "hitl_message": "Auto-approved (no web HITL handler)."
         }
-    else:
-        print("   ❌ User rejected web results. Stopping pipeline.")
+
+    decision = web_hitl_handler(
+        job_id=state.get("job_id", ""),
+        topic=state.get("topic", ""),
+        selected_category=state.get("selected_category", ""),
+        phase="post_web_search",
+        results=normalized_results,
+        ai_summary=ai_summary
+    ) or {}
+    approved = bool(decision.get("approved", True))
+    reason = str(decision.get("reason", ""))
+
+    if approved:
+        print("   Web search results approved by user.")
         return {
-            "hitl_approved": False,
-            "hitl_message": "User rejected web search results",
-            "answer": "Generation cancelled by user."
+            "hitl_approved": True,
+            "hitl_message": "Approved web search results."
         }
+
+    print("   User rejected web results. Stopping pipeline.")
+    return {
+        "hitl_approved": False,
+        "hitl_message": reason or "User rejected web search results",
+        "answer": "Generation cancelled by user."
+    }
+
+
+def web_search_intent_hitl_node(state: AgentState):
+    """
+    HITL checkpoint before executing web search fallback.
+    Requires explicit user approval to run external search.
+    """
+    print("--- 👤 HITL Checkpoint: Web Search Approval (Pre-Search) ---")
+
+    if web_hitl_handler is None:
+        print("   ⚠️ No web HITL handler configured. Auto-approving pre-search checkpoint.")
+        return {
+            "hitl_approved": True,
+            "hitl_message": "Auto-approved (no web HITL handler)."
+        }
+
+    decision = web_hitl_handler(
+        job_id=state.get("job_id", ""),
+        topic=state.get("topic", ""),
+        selected_category=state.get("selected_category", ""),
+        phase="pre_web_search",
+        results=[]
+    ) or {}
+    approved = bool(decision.get("approved", True))
+    reason = str(decision.get("reason", ""))
+
+    if approved:
+        print("   ✅ Web search approved by user.")
+        return {
+            "hitl_approved": True,
+            "hitl_message": "Approved web search execution."
+        }
+
+    print("   ❌ Web search rejected by user.")
+    return {
+        "hitl_approved": False,
+        "hitl_message": reason or "User rejected web search execution.",
+        "answer": "Generation cancelled because web search was rejected before execution."
+    }
 
 
 def route_from_hitl(state: AgentState) -> str:
@@ -1517,7 +1367,91 @@ def route_from_hitl(state: AgentState) -> str:
     return "end_node"
 
 
-# In[29]:
+def route_from_web_intent_hitl(state: AgentState) -> str:
+    """Routes pre-web-search HITL decision."""
+    if state.get('hitl_approved', False):
+        return "web_search"
+    return "end_node"
+
+
+def _build_retrieval_citations(
+    evidence_records: List[Dict[str, Any]],
+    allowed_display_ids: Optional[set[str]] = None
+) -> List[Dict[str, Any]]:
+    citations: List[Dict[str, Any]] = []
+    for item in evidence_records:
+        display_id = str(item.get("display_id", ""))
+        if allowed_display_ids is not None and display_id not in allowed_display_ids:
+            continue
+        citations.append({
+            "source_id": display_id,
+            "evidence_id": item.get("evidence_id", ""),
+            "title": item.get("title", "Unknown source"),
+            "url": item.get("url", ""),
+            "snippet": item.get("snippet", ""),
+            "citation": item.get("citation", ""),
+            "page": item.get("page"),
+            "full_content": item.get("full_content", ""),
+            "relevance_score": item.get("relevance_score", 0.8),
+            "domain": item.get("domain", "local-doc"),
+            "word_count": item.get("word_count", 0),
+            "retrieved_at": item.get("retrieved_at", datetime.now().isoformat()),
+        })
+    return citations
+
+
+def retrieval_hitl_node(state: AgentState):
+    """
+    HITL checkpoint after grader marks local retrieval as relevant.
+    User must approve/reject the citation set before generation.
+    """
+    print("--- 👤 HITL Checkpoint: Retrieval Citation Review ---")
+    citations = state.get("graded_citations", [])
+    if not citations:
+        evidence = state.get("evidence", []) or _build_evidence_records(state.get("documents", []))
+        citations = _build_retrieval_citations(evidence)
+
+    if not citations:
+        return {
+            "hitl_approved": False,
+            "hitl_message": "No citations available for approval.",
+            "answer": "I couldn't find reviewable citations to proceed."
+        }
+
+    if retrieval_hitl_handler is None:
+        print("   ⚠️ No retrieval HITL handler configured. Auto-approving.")
+        return {
+            "graded_citations": citations,
+            "hitl_approved": True,
+            "hitl_message": "Auto-approved (no retrieval HITL handler)."
+        }
+
+    decision = retrieval_hitl_handler(
+        job_id=state.get("job_id", ""),
+        topic=state.get("topic", ""),
+        selected_category=state.get("selected_category", ""),
+        citations=citations
+    ) or {}
+    approved = bool(decision.get("approved", True))
+    reason = str(decision.get("reason", ""))
+
+    if approved:
+        print("   ✅ Retrieval citations approved.")
+        return {
+            "graded_citations": citations,
+            "hitl_approved": True,
+            "hitl_message": "Approved retrieval citations."
+        }
+
+    print("   ❌ Retrieval citations rejected.")
+    return {
+        "graded_citations": citations,
+        "hitl_approved": False,
+        "hitl_message": reason or "User rejected retrieval citations.",
+        "answer": "Generation cancelled because citation set was rejected."
+    }
+
+
 
 
 def critic_node(state: AgentState):
@@ -1634,7 +1568,6 @@ def critic_node(state: AgentState):
     }
 
 
-# In[30]:
 
 
 # --- 4. Routing Logic ---
@@ -1656,7 +1589,6 @@ def route_from_critic(state: AgentState):
         return "generate"
 
 
-# In[31]:
 
 
 # --- 1. The Interface (Abstraction Layer) ---
@@ -1716,7 +1648,6 @@ class LocalSafeExecutor:
 sandbox = LocalSafeExecutor()
 
 
-# In[32]:
 
 
 def code_tester_node(state: AgentState):
@@ -1831,7 +1762,6 @@ def code_tester_node(state: AgentState):
     }
 
 
-# In[33]:
 
 
 # --- 1. Initialize Graph ---
@@ -1852,6 +1782,8 @@ workflow.add_node("query_fanout", traceable(query_fanout_node))
 workflow.add_node("search_worker", traceable(search_worker_node))
 workflow.add_node("deduplicator", traceable(deduplicate_node))
 workflow.add_node("grader", traceable(grade_documents_node))
+workflow.add_node("retrieval_hitl", traceable(retrieval_hitl_node))
+workflow.add_node("web_search_intent_hitl", traceable(web_search_intent_hitl_node))
 workflow.add_node("web_search", traceable(web_search_node))  # Web search fallback
 workflow.add_node("hitl_approval", traceable(hitl_approval_node))  # HITL checkpoint
 workflow.add_node("generate", traceable(generate_answer_node))
@@ -1884,9 +1816,17 @@ workflow.add_edge("deduplicator", "grader")
 
 # Grader routing - adds web_search as fallback option
 workflow.add_conditional_edges("grader", route_from_grader_with_web, {
-    "generate": "generate", 
-    "web_search": "web_search",
+    "retrieval_hitl": "retrieval_hitl",
+    "web_search_intent_hitl": "web_search_intent_hitl",
     "increment_retry": "increment_retry", 
+    "end_node": END
+})
+workflow.add_conditional_edges("web_search_intent_hitl", route_from_web_intent_hitl, {
+    "web_search": "web_search",
+    "end_node": END
+})
+workflow.add_conditional_edges("retrieval_hitl", route_from_hitl, {
+    "generate": "generate",
     "end_node": END
 })
 
@@ -1911,14 +1851,15 @@ workflow.add_conditional_edges("critic", route_from_critic, {
 app = workflow.compile()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE FOR BACKEND INTEGRATION
-# ═══════════════════════════════════════════════════════════════════════════════
 
 # Global vectorstore instance - set by backend before running pipeline
 vectorstore = None
 query_plan_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
 answer_token_stream_handler: Optional[Callable[..., None]] = None
+retrieval_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
+grader_stream_handler: Optional[Callable[..., None]] = None
+web_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
 
 def set_vectorstore(vs):
     """
@@ -1950,9 +1891,37 @@ def set_answer_token_stream_handler(handler: Optional[Callable[..., None]]):
     answer_token_stream_handler = handler
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+def set_retrieval_hitl_handler(handler: Optional[Callable[..., Dict[str, Any]]]):
+    """
+    Set callback for post-grader retrieval citation approval.
+    Expected callback result:
+      {"approved": bool, "reason": str}
+    """
+    global retrieval_hitl_handler
+    retrieval_hitl_handler = handler
+
+
+def set_grader_stream_handler(handler: Optional[Callable[..., None]]):
+    """
+    Set callback to stream sanitized grader rationale.
+    Callback kwargs:
+      job_id: str, text: str, phase: str, done: bool, meta: dict
+    """
+    global grader_stream_handler
+    grader_stream_handler = handler
+
+
+def set_web_hitl_handler(handler: Optional[Callable[..., Dict[str, Any]]]):
+    """
+    Set callback for web-search HITL decisions.
+    Expected callback result:
+      {"approved": bool, "reason": str}
+    """
+    global web_hitl_handler
+    web_hitl_handler = handler
+
+
 # EXPORTS FOR BACKEND INTEGRATION
-# ═══════════════════════════════════════════════════════════════════════════════
 
 __all__ = [
     # Graph
@@ -1965,6 +1934,9 @@ __all__ = [
     "set_vectorstore",
     "set_query_plan_hitl_handler",
     "set_answer_token_stream_handler",
+    "set_retrieval_hitl_handler",
+    "set_grader_stream_handler",
+    "set_web_hitl_handler",
     "SOURCE_FILES",
     "DB_PATH",
     # Document Processing
@@ -1977,6 +1949,8 @@ __all__ = [
     "search_worker_node",
     "deduplicate_node",
     "grade_documents_node",
+    "retrieval_hitl_node",
+    "web_search_intent_hitl_node",
     "generate_answer_node",
     "code_tester_node",
     "critic_node",
@@ -1988,49 +1962,12 @@ __all__ = [
     "route_from_critic",
     "route_from_guardrail",
     "route_from_hitl",
+    "route_from_web_intent_hitl",
     # Utilities
     "tracer",
 ]
 
 
-# In[34]:
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# STANDALONE EXECUTION (only runs when script is executed directly)
-# ═══════════════════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
-    # --- INSTANTIATE DB ---
-    retriever, vectorstore = build_retriever(SOURCE_FILES, "python")
-    categories = get_available_categories(vectorstore)
-
-
-    # In[35]:
-
-
-    # --- RUN EVALUATION ---
-    print(f"\n👁️ OBSERVABILITY LAYER ACTIVE. Running Trace...")
-    topic = "python variables, loops and functions"
-    tracer.start_trace(topic)
-    # Initialize all required state keys
-    inputs = {
-        "topic": topic,
-        "available_categories": categories,
-        "retry_count": 0,
-        "revision_count": 0
-    }
-
-    try:
-        result = app.invoke(inputs, {"recursion_limit": 50})
-        tracer.print_trajectory()
-        tracer.save_trace("full_agent_trace.json")
-        print("\n✅ Final Output Generation Complete.")
-
-    except Exception as e:
-        print(f"❌ Pipeline Failed: {e}")
-        tracer.print_trajectory()
-        tracer.save_trace("failed_agent_trace.json")
-
-
-# %%

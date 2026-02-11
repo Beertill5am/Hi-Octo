@@ -2,7 +2,7 @@
 
 /**
  * RelevanceBar - Visualizes relevance scores (0-100%)
- * with color coding: green (80%+), amber (50-79%), red (<50%)
+ * using purple-only accents to match the UI palette.
  */
 
 interface RelevanceBarProps {
@@ -13,24 +13,15 @@ interface RelevanceBarProps {
 
 export function RelevanceBar({ score, showLabel = true, size = "sm" }: RelevanceBarProps) {
   const percentage = Math.round(score * 100);
-  
-  // Color coding based on relevance
-  let barColor = "bg-red-500";
-  let textColor = "text-red-600";
-  if (percentage >= 80) {
-    barColor = "bg-emerald-500";
-    textColor = "text-emerald-600";
-  } else if (percentage >= 50) {
-    barColor = "bg-amber-500";
-    textColor = "text-amber-600";
-  }
+  const textColor = "text-violet-300";
+  const barColor = "bg-gradient-to-r from-violet-500 to-fuchsia-500";
   
   const barHeight = size === "sm" ? "h-1.5" : "h-2";
   const barWidth = size === "sm" ? "w-16" : "w-20";
   
   return (
     <div className="flex items-center gap-1.5">
-      <div className={`${barWidth} ${barHeight} bg-muted rounded-full overflow-hidden`}>
+      <div className={`${barWidth} ${barHeight} bg-zinc-800 rounded-full overflow-hidden`}>
         <div 
           className={`h-full ${barColor} transition-all duration-500 ease-out`} 
           style={{ width: `${percentage}%` }}
