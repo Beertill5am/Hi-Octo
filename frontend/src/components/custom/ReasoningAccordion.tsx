@@ -8,23 +8,40 @@ interface ReasoningAccordionProps {
 }
 
 const STAGE_LABELS: Record<string, string> = {
-  guardrail: "Guardrail",
+  guardrail: "Safety Check",
+  input_guardrail: "Input Guard",
   dispatcher: "Routing",
-  expander: "Expansion",
+  expander: "Query Expansion",
+  expand_query: "Query Expansion",
   query_plan_hitl: "Plan Review",
+  query_fanout: "Query Fanout",
   search_worker: "Search",
-  deduplicator: "Dedup",
+  deduplicator: "Deduplicate",
+  deduplicate: "Deduplicate",
   grader: "Grading",
+  grade_documents: "Grade Documents",
+  web_search: "Web Search",
+  web_search_intent_hitl: "Web Approval",
+  retrieval_hitl: "Citation Review",
+  draft_review_hitl: "Draft Review",
   generate: "Generation",
-  critic: "Critic",
+  code_tester: "Code Testing",
+  critic: "Quality Review",
   pipeline: "Pipeline",
 };
+
+function prettifyStageName(name: string): string {
+  return name
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
 
 export function ReasoningAccordion({ entries, done }: ReasoningAccordionProps) {
   const recent = entries.slice(-12);
   const stageSet = new Set<string>();
   for (const entry of recent) {
-    stageSet.add(STAGE_LABELS[entry.stage] || entry.stage);
+    stageSet.add(STAGE_LABELS[entry.stage] || prettifyStageName(entry.stage));
   }
 
   return (
@@ -53,7 +70,7 @@ export function ReasoningAccordion({ entries, done }: ReasoningAccordionProps) {
         {recent.map((entry) => (
           <div key={`${entry.seq}-${entry.stage}`} className="text-xs leading-relaxed text-muted-foreground">
             <span className="mr-1 font-mono text-[11px] text-foreground/75">
-              {STAGE_LABELS[entry.stage] || entry.stage}
+              {STAGE_LABELS[entry.stage] || prettifyStageName(entry.stage)}
             </span>
             {entry.text}
           </div>

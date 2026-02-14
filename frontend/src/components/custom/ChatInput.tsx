@@ -1,8 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { usePipelineStore } from "@/lib/store";
 import { getIntent, startPipeline, subscribeToPipelineStatus } from "@/lib/api";
 import { Send, Loader2 } from "lucide-react";
@@ -14,6 +13,7 @@ export function ChatInput() {
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const { startJob, handleSSEEvent, status, addMessage, messages } = usePipelineStore();
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const truncate = (text: string, maxChars: number): string =>
     text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
@@ -30,6 +30,14 @@ export function ChatInput() {
     return history.slice(-MAX_INTENT_CONTEXT_MESSAGES);
   };
 
+  /* Auto-resize the textarea */
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [query]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim() || isLoading) return;
@@ -39,15 +47,12 @@ export function ChatInput() {
     setQuery("");
 
     try {
-      // Add user message immediately
       addMessage("user", trimmed);
-      
-      // Get intent classification from backend
+
       const context = buildIntentContext(trimmed);
       const intent = await getIntent(trimmed, context);
 
       if (intent.action === "greeting" || intent.action === "clarify") {
-        // Show dynamic LLM response with typewriter effect
         addMessage("assistant", intent.message, { isNew: true });
         if (intent.examples.length > 0) {
           setTimeout(() => {
@@ -58,7 +63,6 @@ export function ChatInput() {
       }
 
       if (intent.action === "choose_source") {
-        // Show inline quick replies instead of modal
         addMessage("assistant", "How would you like me to answer?", {
           isNew: true,
           showQuickReplies: true,
@@ -73,7 +77,6 @@ export function ChatInput() {
         return;
       }
 
-      // Direct pipeline execution (fallback)
       const response = await startPipeline(trimmed);
       startJob(response.job_id, trimmed, { skipUserMessage: true });
 
@@ -87,57 +90,39 @@ export function ChatInput() {
       );
     } catch (error) {
       console.error("Failed to process:", error);
-      addMessage("system", `❌ Error: ${(error as Error).message}`);
+      addMessage("system", `Something went wrong — please try again. (${(error as Error).message})`);
     } finally {
       setIsLoading(false);
     }
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
+  };
+
   const isDisabled = isLoading || status === "running" || status === "hitl_waiting";
-  const statusLabel =
-    status === "running"
-      ? "Thinking"
-      : status === "hitl_waiting"
-      ? "Waiting"
-      : status === "completed"
-      ? "Completed"
-      : status === "failed"
-      ? "Failed"
-      : isLoading
-      ? "Thinking"
-      : "Idle";
-  const statusColor =
-    statusLabel === "Thinking"
-      ? "border-violet-500/40 bg-violet-500/10 text-violet-300"
-      : statusLabel === "Waiting"
-      ? "border-slate-500/40 bg-slate-500/15 text-slate-200"
-      : statusLabel === "Completed"
-      ? "border-violet-400/30 bg-violet-400/10 text-violet-200"
-      : statusLabel === "Failed"
-      ? "border-zinc-500/50 bg-zinc-500/20 text-zinc-100"
-      : "border-border bg-muted/40 text-muted-foreground";
 
   return (
-    <div className="border-t border-border bg-background p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <span className="text-xs uppercase tracking-wide text-muted-foreground">System status</span>
-        <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${statusColor}`}>
-          {statusLabel}
-        </span>
-      </div>
-
-      <form onSubmit={handleSubmit} className="flex gap-3">
-        <Input
+    <div className="px-4 pb-4 pt-2">
+      <form onSubmit={handleSubmit} className="relative flex items-end gap-2">
+        <textarea
+          ref={textareaRef}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Try: Compare Python lists vs tuples with examples"
+          onKeyDown={handleKeyDown}
+          placeholder="Ask anything…"
           disabled={isDisabled}
-          className="flex-1 bg-muted/50 border-border focus:ring-violet-500"
+          rows={1}
+          className="flex-1 resize-none rounded-xl border border-border bg-muted/40 px-4 py-3 text-sm leading-relaxed text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-shadow disabled:opacity-50"
         />
-        <Button 
-          type="submit" 
+        <Button
+          type="submit"
           disabled={isDisabled || !query.trim()}
-          className="bg-violet-500 hover:bg-violet-600 text-white"
+          size="icon"
+          className="h-10 w-10 shrink-0 rounded-xl bg-violet-600 hover:bg-violet-500 text-white shadow-lg shadow-violet-600/20 transition-all disabled:opacity-40 disabled:shadow-none"
         >
           {isLoading ? (
             <Loader2 className="h-4 w-4 animate-spin" />

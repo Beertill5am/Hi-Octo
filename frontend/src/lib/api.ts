@@ -61,12 +61,20 @@ export interface HITLPendingData {
     | "retrieval_review"
     | "pre_web_search_review"
     | "reasoning_review"
-    | "blueprint_review";
+    | "blueprint_review"
+    | "draft_review";
   query: string;
   ai_summary?: string;
   reasoning_text?: string;
   blueprint_text?: string;
   editable_text?: string;
+  // Draft review fields
+  current_draft?: string;
+  critic_feedback?: string[];
+  critic_praise?: string;
+  critic_score?: number;
+  code_execution_logs?: string;
+  iteration_count?: number;
   search_results: EnhancedSearchResult[];
   // Transparency metadata
   total_results_found: number;

@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { SearchResultCard } from "./SearchResultCard";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { BrainCircuit, CheckCircle, FileText, Loader2, Search, XCircle } from "lucide-react";
+import { BrainCircuit, CheckCircle, ChevronDown, ChevronRight, FileText, Loader2, MessageSquareWarning, Search, Terminal, XCircle } from "lucide-react";
 
 function extractSourceRefs(text: string): string[] {
   if (!text) return [];
@@ -76,6 +76,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
   const [showRejectionInput, setShowRejectionInput] = useState(false);
   const [visibleCount, setVisibleCount] = useState(0);
   const [editableText, setEditableText] = useState("");
+  const [showCodeLogs, setShowCodeLogs] = useState(false);
 
   useEffect(() => {
     if (showHITLModal) {
@@ -124,10 +125,16 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
   const isPreWebSearchReview = activeHitlData?.hitl_type === "pre_web_search_review";
   const isReasoningReview = activeHitlData?.hitl_type === "reasoning_review";
   const isBlueprintReview = activeHitlData?.hitl_type === "blueprint_review";
+  const isDraftReview = activeHitlData?.hitl_type === "draft_review";
   const reasoningText = normalizeMarkdownText((activeHitlData?.reasoning_text || "").trim());
   const blueprintText = normalizeMarkdownText((activeHitlData?.blueprint_text || "").trim());
+  const criticFeedback = activeHitlData?.critic_feedback ?? [];
+  const criticPraise = (activeHitlData?.critic_praise || "").trim();
+  const criticScore = activeHitlData?.critic_score;
+  const codeLogs = (activeHitlData?.code_execution_logs || "").trim();
+  const iterationCount = activeHitlData?.iteration_count ?? 0;
   const validatedSummary = useMemo(() => {
-    if (isPreWebSearchReview || isReasoningReview || isBlueprintReview || !activeHitlData?.ai_summary) return "";
+    if (isPreWebSearchReview || isReasoningReview || isBlueprintReview || isDraftReview || !activeHitlData?.ai_summary) return "";
 
     const allowedSources = new Set<string>();
     results.forEach((result, index) => {
@@ -138,7 +145,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
     });
 
     return filterSummaryLinesBySources(activeHitlData.ai_summary, allowedSources);
-  }, [activeHitlData?.ai_summary, isPreWebSearchReview, isReasoningReview, isBlueprintReview, results]);
+  }, [activeHitlData?.ai_summary, isPreWebSearchReview, isReasoningReview, isBlueprintReview, isDraftReview, results]);
 
   useEffect(() => {
     if (!activeHitlData) {
@@ -190,7 +197,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
     if (isReadOnly || !jobId) return;
     setIsApproving(true);
     try {
-      const editedForReview = (isReasoningReview || isBlueprintReview) ? editableText.trim() : undefined;
+      const editedForReview = (isReasoningReview || isBlueprintReview || isDraftReview) ? editableText.trim() : undefined;
       await approveHITL(jobId, undefined, editedForReview);
       archiveCurrentHITL("approved");
       closeHITLModal();
@@ -221,13 +228,17 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
   return (
     <section className="mb-6">
       <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
-        {isReasoningReview || isBlueprintReview ? (
+        {isDraftReview ? (
+          <MessageSquareWarning className="h-4 w-4 text-amber-400" />
+        ) : isReasoningReview || isBlueprintReview ? (
           <BrainCircuit className="h-4 w-4 text-violet-400" />
         ) : (
           <Search className="h-4 w-4 text-violet-400" />
         )}
         {isBlueprintReview
           ? "Blueprint Review"
+          : isDraftReview
+          ? `Draft Review (Revision #${iterationCount})`
           : isReasoningReview
           ? "Reasoning Review"
           : isRetrievalReview
@@ -243,7 +254,9 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
         </div>
       )}
       <p className="mb-4 text-xs text-zinc-500">
-        {activeHitlData.reason_for_web_search || (isRetrievalReview
+        {activeHitlData.reason_for_web_search || (isDraftReview
+          ? `The critic reviewed your draft. Review feedback below.`
+          : isRetrievalReview
           ? "Review citations before generation."
           : isBlueprintReview
           ? "Blueprint is ready. Accept, reject, or edit before article generation."
@@ -309,14 +322,82 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
         </div>
       )}
 
-      {validatedSummary && !isPreWebSearchReview && !isReasoningReview && !isBlueprintReview && (
+      {/* ── Draft Review: Critic Feedback ──────────────────────────── */}
+      {isDraftReview && criticFeedback.length > 0 && (
+        <div className="mb-4 rounded-md border border-zinc-800 bg-zinc-950/70 p-3">
+          <div className="mb-2 flex items-center gap-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+              <MessageSquareWarning className="mr-1 inline h-3 w-3" />
+              Critic Feedback
+            </p>
+            {criticScore != null && (
+              <span className="ml-auto rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-bold text-zinc-200">
+                Score: {criticScore}/10
+              </span>
+            )}
+          </div>
+          <ul className="space-y-1.5">
+            {criticFeedback.map((item, i) => (
+              <li key={i} className="flex items-start gap-2 text-xs text-zinc-300">
+                <span className="mt-0.5 shrink-0 text-zinc-500">•</span>
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+          {criticPraise && (
+            <div className="mt-3 border-t border-zinc-800 pt-2">
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-400">Praise (Keep These)</p>
+              <p className="whitespace-pre-wrap text-xs text-zinc-300">{criticPraise}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Draft Review: Code Execution Logs ─────────────────────── */}
+      {isDraftReview && codeLogs && (
+        <div className="mb-4 rounded-md border border-zinc-800 bg-zinc-950/70">
+          <button
+            type="button"
+            onClick={() => setShowCodeLogs(!showCodeLogs)}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-zinc-400 hover:text-zinc-300 transition-colors"
+          >
+            <Terminal className="h-3 w-3" />
+            Code Execution Logs
+            {showCodeLogs ? <ChevronDown className="ml-auto h-3 w-3" /> : <ChevronRight className="ml-auto h-3 w-3" />}
+          </button>
+          {showCodeLogs && (
+            <pre className="max-h-[200px] overflow-auto border-t border-zinc-800 px-3 py-2 text-[11px] leading-relaxed text-emerald-400 font-mono">
+              {codeLogs}
+            </pre>
+          )}
+        </div>
+      )}
+
+      {/* ── Draft Review: Editable Draft ──────────────────────────── */}
+      {isDraftReview && (
+        <div className="mb-4 rounded-md border border-zinc-800 bg-black/60 p-3">
+          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+            <FileText className="mr-1 inline h-3 w-3" />
+            Current Draft (editable)
+          </p>
+          <textarea
+            value={editableText}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditableText(e.target.value)}
+            readOnly={isReadOnly}
+            className="flex min-h-[250px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500 font-mono leading-relaxed"
+            placeholder="Edit the draft before revision..."
+          />
+        </div>
+      )}
+
+      {validatedSummary && !isPreWebSearchReview && !isReasoningReview && !isBlueprintReview && !isDraftReview && (
         <div className="mb-4 rounded-md border border-zinc-800 bg-zinc-950/70 p-3">
           <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">LLM Summary</p>
           <p className="whitespace-pre-wrap text-xs text-zinc-300">{validatedSummary}</p>
         </div>
       )}
 
-      <div className="mb-4 flex flex-wrap gap-2 text-xs text-zinc-400">
+      <div className={`mb-4 flex flex-wrap gap-2 text-xs text-zinc-400 ${isDraftReview ? 'hidden' : ''}`}>
         <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5">
           Query: <strong className="font-mono text-zinc-200">{activeHitlData.query}</strong>
         </span>
@@ -327,7 +408,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
         )}
       </div>
 
-      {!isPreWebSearchReview && !isReasoningReview && !isBlueprintReview && results.length > 0 && (
+      {!isPreWebSearchReview && !isReasoningReview && !isBlueprintReview && !isDraftReview && results.length > 0 && (
         <div className="space-y-4">
           {results.slice(0, visibleCount).map((result, i) => (
             <SearchResultCard key={i} result={result} index={i} animateTyping={!isReadOnly} />
@@ -338,7 +419,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
       {!isReadOnly && showRejectionInput ? (
         <div className="mt-4 space-y-2 border-t border-zinc-800 pt-3">
           <textarea
-            placeholder={isBlueprintReview ? "Optional reason for rejecting blueprint..." : isReasoningReview ? "Optional reason for rejecting reasoning..." : "Optional reason for rejection..."}
+            placeholder={isDraftReview ? "Optional notes for the next revision..." : isBlueprintReview ? "Optional reason for rejecting blueprint..." : isReasoningReview ? "Optional reason for rejecting reasoning..." : "Optional reason for rejection..."}
             value={rejectionReason}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setRejectionReason(e.target.value)}
             className="flex min-h-[54px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500"
@@ -356,7 +437,9 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
       ) : !isReadOnly ? (
         <div className="mt-4 flex items-center gap-2 border-t border-zinc-800 pt-3">
           <div className="flex-1 text-xs italic text-zinc-500">
-            {isBlueprintReview
+            {isDraftReview
+              ? "Revise to send back for another iteration, or keep as final."
+              : isBlueprintReview
               ? "Accept as-is, edit the blueprint, or reject to stop generation."
               : isReasoningReview
               ? "Accept as-is, edit the draft plan, or reject to stop generation."
@@ -364,6 +447,18 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
               ? "Approve to run web search."
               : "Approve to continue generation from these citations."}
           </div>
+          {isDraftReview && (
+            <Button
+              variant="outline"
+              className="h-8 rounded-full border-emerald-800 bg-emerald-950/40 px-3 text-emerald-400 hover:bg-emerald-900/50"
+              onClick={handleReject}
+              disabled={isApproving || isRejecting}
+            >
+              {isRejecting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckCircle className="mr-1 h-3.5 w-3.5" />}
+              Keep as Final
+            </Button>
+          )}
+          {!isDraftReview && (
           <Button
             variant="outline"
             className="h-8 rounded-full border-zinc-300 bg-white px-3 text-black hover:bg-zinc-100"
@@ -373,13 +468,16 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
             <XCircle className="mr-1 h-3.5 w-3.5" />
             Reject
           </Button>
+          )}
           <Button
             className="h-8 rounded-full bg-violet-600 px-3 text-white hover:bg-violet-500"
             onClick={handleApprove}
             disabled={isApproving || isRejecting}
           >
             {isApproving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckCircle className="mr-1 h-3.5 w-3.5" />}
-            {isBlueprintReview || isReasoningReview
+            {isDraftReview
+              ? "Revise Draft"
+              : isBlueprintReview || isReasoningReview
               ? "Accept / Apply Edit"
               : isPreWebSearchReview
               ? "Approve & Search Web"

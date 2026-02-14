@@ -58,6 +58,13 @@ async def get_pending_hitl(job_id: str):
         reasoning_text=hitl_data.get("reasoning_text"),
         blueprint_text=hitl_data.get("blueprint_text"),
         editable_text=hitl_data.get("editable_text"),
+        # Draft review fields
+        current_draft=hitl_data.get("current_draft"),
+        critic_feedback=hitl_data.get("critic_feedback", []),
+        critic_praise=hitl_data.get("critic_praise"),
+        critic_score=hitl_data.get("critic_score"),
+        code_execution_logs=hitl_data.get("code_execution_logs"),
+        iteration_count=hitl_data.get("iteration_count", 0),
         search_results=search_results,
         total_results_found=hitl_data.get("total_results_found", len(search_results)),
         results_shown=len(search_results),
@@ -67,7 +74,9 @@ async def get_pending_hitl(job_id: str):
         requires_approval=True,
         message=hitl_data.get(
             "message",
-            "Review retrieved citations before generation"
+            "Review the critic's feedback. Apply changes, edit the draft, or keep as final."
+            if hitl_type == "draft_review"
+            else "Review retrieved citations before generation"
             if hitl_type == "retrieval_review"
             else "Approve web search before execution"
             if hitl_type == "pre_web_search_review"

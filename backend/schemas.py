@@ -163,12 +163,19 @@ class HITLPendingData(BaseModel):
     query: str
     hitl_type: str = Field(
         "web_search_review",
-        description="web_search_review | retrieval_review | pre_web_search_review | reasoning_review | blueprint_review",
+        description="web_search_review | retrieval_review | pre_web_search_review | reasoning_review | blueprint_review | draft_review",
     )
     ai_summary: Optional[str] = None
     reasoning_text: Optional[str] = None
     blueprint_text: Optional[str] = None
     editable_text: Optional[str] = None
+    # Draft review fields (iterative report generation)
+    current_draft: Optional[str] = Field(None, description="Current draft text for review")
+    critic_feedback: List[str] = Field(default_factory=list, description="List of critic feedback items")
+    critic_praise: Optional[str] = Field(None, description="What the critic says should be preserved")
+    critic_score: Optional[int] = Field(None, ge=0, le=10, description="Critic score 0-10")
+    code_execution_logs: Optional[str] = Field(None, description="Code testing output logs")
+    iteration_count: int = Field(0, description="Current revision iteration number")
     search_results: List[EnhancedSearchResult] = Field(default_factory=list)
     # Transparency metadata
     total_results_found: int = Field(0, description="Total results from search")

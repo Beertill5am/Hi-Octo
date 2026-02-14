@@ -375,7 +375,7 @@ class AdvancedTraceLogger:
     def start_trace(self, topic: str):
         self.trace_id = f"run_{int(time.time())}"
         self.events = []
-        print(f"🔴 STARTING TRACE: {self.trace_id} | Goal: '{topic}'")
+        print(f"[TRACE] Starting trace {self.trace_id} | Topic: '{topic}'")
 
     def log_event(self, node_name: str, event_type: str, payload: Any, latency: float = 0.0):
         """
@@ -393,22 +393,22 @@ class AdvancedTraceLogger:
 
         # Real-time console output
         if event_type == "error":
-            print(f"   ❌ {node_name}: {entry['payload']}")
+            print(f"  [ERROR] {node_name}: {entry['payload']}")
         else:
-            print(f"   ⏱️  {node_name}: {entry['latency']}s")
+            print(f"  [OK] {node_name}: {entry['latency']}s")
 
     def print_trajectory(self):
         """
         Pattern: Agent Trajectories (Chapter 19, Pg 316)
         Visualizes the sequence of steps taken to reach the solution.
         """
-        print(f"\n🗺️ AGENT TRAJECTORY: {self.trace_id}")
+        print(f"\n[TRAJECTORY] {self.trace_id}")
         print("="*60)
         total_time = sum(e['latency'] for e in self.events)
 
         for i, event in enumerate(self.events):
-            icon = "⚡" if event['type'] == 'execution' else "⚠️"
-            print(f"{i+1:02d}. {icon} {event['node']:<15} | {event['latency']:<6}s | {event['payload']}")
+            tag = "OK" if event['type'] == 'execution' else "WARN"
+            print(f"{i+1:02d}. [{tag}] {event['node']:<15} | {event['latency']:<6}s | {event['payload']}")
 
         print("-" * 60)
         print(f"Total Execution Time: {round(total_time, 2)}s")
@@ -426,7 +426,7 @@ class AdvancedTraceLogger:
         with open(filename, "w") as f:
             json.dump(data, f, indent=2)
 
-        print(f"\n💾 Trace successfully saved to '{filename}'")
+        print(f"[TRACE] Saved to '{filename}'")
 
 # Singleton Instance
 tracer = AdvancedTraceLogger()
@@ -514,6 +514,8 @@ class AgentState(TypedDict):
     query_plan_message: str
     query_plan_rejection_reason: str
     graded_citations: List[Dict[str, Any]]
+    code_execution_logs: str
+    critic_score: int
 
 
 def _chunk_to_text(chunk: Any) -> str:
@@ -611,7 +613,7 @@ def search_worker_node(request: SearchRequest):
     query = request['query']
     category = request['category']
 
-    print(f"    🚀 Worker launching: '{query}'")
+    print(f"  [WORKER] Searching: '{query}'")
 
     # Re-using your existing vectorstore logic
     results = vectorstore.similarity_search(
@@ -636,7 +638,7 @@ def map_queries_node(state: AgentState):
     if category == "out_of_domain":
         return [] # No work to do
 
-    print(f"--- ⚡ Dispatching {len(queries)} parallel search workers ---")
+    print(f"[FANOUT] Dispatching {len(queries)} parallel search workers")
 
     # We return a list of Send objects. 
     # Arg 1: The name of the node to call ("search_worker")
@@ -652,7 +654,7 @@ def query_plan_hitl_node(state: AgentState):
     Query-plan checkpoint immediately after expansion.
     Lets backend pause and request user approve/reject/edit of generated queries.
     """
-    print("--- 👤 HITL Checkpoint: Query Plan Review ---")
+    print("[HITL] Query Plan Review checkpoint")
 
     queries = state.get("queries", [])
     if not queries:
@@ -663,7 +665,7 @@ def query_plan_hitl_node(state: AgentState):
         }
 
     if query_plan_hitl_handler is None:
-        print("   ⚠️ No query-plan HITL handler configured. Auto-approving.")
+        print("  [HITL] No query-plan handler — auto-approving.")
         return {
             "query_plan_approved": True,
             "query_plan_message": "Auto-approved (no query-plan HITL handler).",
@@ -682,7 +684,7 @@ def query_plan_hitl_node(state: AgentState):
     reason = str(decision.get("reason", ""))
 
     if approved:
-        print(f"   ✅ Query plan approved with {len(edited_queries)} queries.")
+        print(f"  [HITL] Query plan approved ({len(edited_queries)} queries).")
         return {
             "queries": edited_queries,
             "query_plan_approved": True,
@@ -690,7 +692,7 @@ def query_plan_hitl_node(state: AgentState):
             "query_plan_rejection_reason": ""
         }
 
-    print("   ❌ Query plan rejected by user.")
+    print("  [HITL] Query plan rejected by user.")
     return {
         "query_plan_approved": False,
         "query_plan_message": "Query plan rejected.",
@@ -727,7 +729,7 @@ def deduplicate_node(state: AgentState):
             unique_contents.add(doc.page_content)
             unique_docs.append(doc)
 
-    print(f"    ✅ Merged & Deduplicated: {len(unique_docs)} unique docs (from {len(raw_docs)} total).")
+    print(f"  [DEDUP] {len(unique_docs)} unique docs (from {len(raw_docs)} total).")
     evidence_records = _build_evidence_records(unique_docs)
     # Canonical snapshot for this attempt only.
     return {"documents": unique_docs, "worker_documents": [], "evidence": evidence_records}
@@ -736,7 +738,7 @@ def deduplicate_node(state: AgentState):
 
 
 def increment_retry_node(state: AgentState):
-    print("   🔄 Loop: Incrementing retry count...")
+    print("  [LOOP] Incrementing retry count")
     return {"retry_count": state.get('retry_count', 0) + 1} 
 
 
@@ -748,12 +750,12 @@ class RouteDecision(BaseModel):
     reasoning: str = Field(description="The logical justification provided by the reasoning model")
 
 def dispatcher_node(state: AgentState):
-    print("--- 🚦 Decoupled Dispatcher: Routing Query ---")
+    print("[DISPATCH] Routing query")
     topic = state['topic']
     categories = state.get('available_categories', [])
 
     if not categories:
-        print("   ⚠️ No categories found in state.")
+        print("  [DISPATCH] No categories found in state.")
         return {"selected_category": "out_of_domain"}
 
     # 1. Reasoning Stage - Chain of Thought 
@@ -791,24 +793,24 @@ def dispatcher_node(state: AgentState):
             selected = "out_of_domain"
 
     except Exception as e:
-        print(f"❌ Formatting failed: {e}")
+        print(f"  [DISPATCH] Formatting failed: {e}")
         selected = "out_of_domain"
 
-    print(f"👉 Routed to: {selected}")
+    print(f"  [DISPATCH] Routed to: {selected}")
     return {"selected_category": selected}
 
 
 
 
 def expand_query_node(state: AgentState):
-    print("--- 🧠 Expander: Reasoning & Generating Variations ---")
+    print("[EXPAND] Generating query variations")
     topic = state['topic']
     current_retry = state.get('retry_count', 0)
     selected_category = state.get('selected_category')
 
     # 1. Fast Exit: Out of Domain
     if selected_category == "out_of_domain":
-        print("⚠️ Out of domain detected. Skipping expansion.")
+        print("  [EXPAND] Out of domain — skipping.")
         return {"queries": []}
 
     # 2. Define Schema for Structured Output
@@ -817,7 +819,7 @@ def expand_query_node(state: AgentState):
 
     # 3. Dynamic Prompting
     if current_retry > 0:
-        print(f"🔄 Retry #{current_retry} detected. Broadening search scope.")
+        print(f"  [EXPAND] Retry #{current_retry} — broadening scope.")
         instruction = (
             f"PREVIOUS SEARCH FAILED. The previous queries for '{topic}' were too narrow. "
             "Generate 5 NEW, BROADER, or ALTERNATIVE search queries. Focus on "
@@ -850,7 +852,7 @@ def expand_query_node(state: AgentState):
         parsed_output = QueryExpansion.model_validate_json(extract_json(json_raw))
         queries = parsed_output.queries
     except Exception as e:
-        print(f"❌ JSON Extraction failed: {e}. Falling back to regex/split.")
+        print(f"  [EXPAND] JSON extraction failed: {e}. Using regex fallback.")
         # Robust Fallback: Clean up lines that look like list items
         queries = [
             line.strip().lstrip('123456789.-* ').strip() 
@@ -868,7 +870,7 @@ def expand_query_node(state: AgentState):
 
 
 def retrieve_node(state: AgentState):
-    print(f"--- 🕵️ Researcher: Dynamic Retrieval ---")
+    print("[RETRIEVE] Dynamic retrieval")
 
     # 1. Get Inputs
     queries = state.get('queries', [state['topic']]) # Use the expanded queries!
@@ -876,10 +878,10 @@ def retrieve_node(state: AgentState):
 
     # 2. Scope Guardrail
     if category == "out_of_domain":
-        print("   ⛔ Query is out of domain. Skipping retrieval.")
+        print("  [RETRIEVE] Out of domain — skipping.")
         return {"documents": []}
 
-    print(f"    🔍 Searching {len(queries)} queries in domain: '{category}'")
+    print(f"  [RETRIEVE] Searching {len(queries)} queries in '{category}'")
 
     all_docs = []
 
@@ -903,7 +905,7 @@ def retrieve_node(state: AgentState):
             unique_contents.add(doc.page_content)
             unique_docs.append(doc)
 
-    print(f"    ✅ Retrieved {len(unique_docs)} unique chunks (reduced from {len(all_docs)}).")
+    print(f"  [RETRIEVE] {len(unique_docs)} unique chunks (from {len(all_docs)} total)")
 
     return {"documents": unique_docs}
 
@@ -916,7 +918,7 @@ def grade_documents_node(state: AgentState):
     1. DeepSeek-R1: Reasons if the content is relevant.
     2. Qwen: Extracts the binary 'yes'/'no' decision.
     """
-    print("--- ⚖️ Grader: Verifying relevance (Dual-Model) ---")
+    print("[GRADE] Verifying relevance")
     topic = state['topic']
     docs = state.get('documents', [])
     evidence = state.get('evidence', []) or _build_evidence_records(docs)
@@ -990,7 +992,7 @@ def grade_documents_node(state: AgentState):
             # Prevent mismatch: relevance without any verified citation is treated as not relevant.
             is_relevant = False
     except Exception as e:
-        print(f"❌ Grading format failed: {e}. Defaulting to 'no'.")
+        print(f"  [GRADE] Format error: {e}. Defaulting to not relevant.")
         is_relevant = False
         verified_display_ids = []
         verified_citations = []
@@ -1011,12 +1013,12 @@ def grade_documents_node(state: AgentState):
                     meta={"chunk": idx}
                 )
         except Exception as e:
-            print(f"   ⚠️ Grader stream warning: {e}")
+            print(f"  [GRADE] Stream warning: {e}")
 
     if is_relevant:
-        print("   ✅ Grader: Content is RELEVANT.")
+        print("  [GRADE] Content is relevant.")
     else:
-        print("   ⛔ Grader: Content is IRRELEVANT.")
+        print("  [GRADE] Content is not relevant.")
 
     if grader_stream_handler is not None:
         try:
@@ -1033,7 +1035,7 @@ def grade_documents_node(state: AgentState):
                 }
             )
         except Exception as e:
-            print(f"   ⚠️ Grader final stream warning: {e}")
+            print(f"  [GRADE] Final stream warning: {e}")
 
     return {"is_relevant": is_relevant, "graded_citations": verified_citations, "evidence": evidence}
 
@@ -1041,7 +1043,7 @@ def grade_documents_node(state: AgentState):
 
 
 def generate_answer_node(state: AgentState):
-    print("--- 💡 Generator: The Triad Pipeline (Instrumented) ---")
+    print("[GENERATE] Writing answer")
 
     # --- State Extraction ---
     topic = state['topic']
@@ -1064,7 +1066,7 @@ def generate_answer_node(state: AgentState):
     # On subsequent loops, we stick to the original plan to avoid drift.
 
     if revision_count == 0:
-        print("   🏗️  Phase 1: Analyzing and Blueprinting...")
+        print("  [GENERATE] Phase 1: Analyzing and blueprinting")
 
         # --- A. REASONING ---
         llm_reasoning = ChatOllama(model="deepseek-r1:8b", temperature=0.6, num_ctx=8192)
@@ -1102,7 +1104,7 @@ def generate_answer_node(state: AgentState):
                     meta={"replace": False},
                 )
             except Exception as e:
-                print(f"   ⚠️ Reasoning stream warning: {e}")
+                print(f"  [GENERATE] Reasoning stream warning: {e}")
 
         # --- B. BLUEPRINT (Qwen) ---
         llm_architect = ChatOllama(model="qwen3:8b", temperature=0.6, num_ctx=8192)
@@ -1141,7 +1143,7 @@ def generate_answer_node(state: AgentState):
             review_sources = normalized_results
 
         if reasoning_hitl_handler is None:
-            print("   ⚠️ No reasoning HITL handler configured. Auto-approving reasoning review.")
+            print("  [HITL] No reasoning HITL handler — auto-approving.")
         else:
             decision = reasoning_hitl_handler(
                 job_id=state.get("job_id", ""),
@@ -1156,7 +1158,7 @@ def generate_answer_node(state: AgentState):
             edited_text = str(decision.get("edited_text", "") or "").strip()
 
             if not approved:
-                print("   ❌ Reasoning review rejected.")
+                print("  [HITL] Reasoning review rejected.")
                 return {
                     "hitl_approved": False,
                     "hitl_message": reason or "User rejected reasoning review.",
@@ -1164,12 +1166,12 @@ def generate_answer_node(state: AgentState):
                 }
 
             if edited_text:
-                print("   ✍️ Applying user-edited reasoning blueprint.")
+                print("  [HITL] Applying user-edited reasoning blueprint.")
                 current_blueprint = edited_text
 
         # --- C. BLUEPRINT HITL CHECKPOINT ---
         if blueprint_hitl_handler is None:
-            print("   ⚠️ No blueprint HITL handler configured. Auto-approving blueprint review.")
+            print("  [HITL] No blueprint HITL handler — auto-approving.")
         else:
             bp_decision = blueprint_hitl_handler(
                 job_id=state.get("job_id", ""),
@@ -1184,7 +1186,7 @@ def generate_answer_node(state: AgentState):
             bp_edited = str(bp_decision.get("edited_text", "") or "").strip()
 
             if not bp_approved:
-                print("   ❌ Blueprint review rejected.")
+                print("  [HITL] Blueprint review rejected.")
                 return {
                     "hitl_approved": False,
                     "hitl_message": bp_reason or "User rejected blueprint review.",
@@ -1192,11 +1194,11 @@ def generate_answer_node(state: AgentState):
                 }
 
             if bp_edited:
-                print("   ✍️ Applying user-edited blueprint.")
+                print("  [HITL] Applying user-edited blueprint.")
                 current_blueprint = bp_edited
 
     else:
-        print(f"   🔄 Revision #{revision_count}: Skipping Blueprinting. Using existing plan.")
+        print(f"  [GENERATE] Revision #{revision_count}: Reusing existing blueprint.")
 
     # ============================================================
     # PHASE 2: WRITING / REFINING (Iterative)
@@ -1206,7 +1208,7 @@ def generate_answer_node(state: AgentState):
 
     # --- Branch A: First Draft ---
     if revision_count == 0:
-        print("   ✍️  Phase 2: Writing Initial Draft...")
+        print("  [GENERATE] Phase 2: Writing initial draft")
         instruction = f"""
         You are a Senior Technical Writer for "Real Python".
         Your goal is to write a comprehensive, engaging, and highly educational guide based on a specific BLUEPRINT.
@@ -1230,7 +1232,7 @@ def generate_answer_node(state: AgentState):
 
     # --- Branch B: Refinement based on Critic ---
     else:
-        print(f"   🛠️  Phase 2: Refining Draft based on Feedback...")
+        print(f"  [GENERATE] Phase 2: Refining draft (feedback-driven)")
         # 1. Retrieve Praise (Current)
         praise = state.get('critique_praise', "None")
 
@@ -1318,7 +1320,7 @@ def route_from_grader_with_web(state: AgentState):
         return "increment_retry"
     elif not web_search_performed:
         # After 2 retries: ask user approval before web search.
-        print("   🌐 Local RAG exhausted. Requesting approval before web search...")
+        print("  [ROUTE] Local RAG exhausted — requesting web search approval.")
         return "web_search_intent_hitl"
     else:
         # Web search also failed - graceful exit
@@ -1339,7 +1341,7 @@ def hitl_approval_node(state: AgentState):
     - Estimated token cost for generation
     - Approve/Reject/Edit buttons
     """
-    print("--- 👤 HITL Checkpoint: Web Search Results ---")
+    print("[HITL] Web Search Results review")
     
     web_results = state.get('web_search_results', [])
     web_answer = state.get('web_search_answer', None)
@@ -1358,15 +1360,15 @@ def hitl_approval_node(state: AgentState):
     
     # Display what we found (for observability)
     if web_answer:
-        print(f"   💡 Tavily AI Summary: {web_answer[:200]}...")
+        print(f"  [HITL] AI Summary: {web_answer[:200]}...")
     
-    print(f"   📄 Retrieved {len(web_results)} sources:")
+    print(f"  [HITL] Retrieved {len(web_results)} sources")
     for i, result in enumerate(web_results[:5]):  # Show top 5
         if hasattr(result, 'title'):
             print(f"      {i+1}. {result.title[:60]}...")
             print(f"         🔗 {result.url}")
         elif isinstance(result, dict):
-            print(f"      {i+1}. {result.get('title', 'No title')[:60]}...")
+            print(f"      {i+1}. {result.get('title', 'No title')[:60]}")
             print(f"         🔗 {result.get('url', 'No URL')}")
     
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1374,7 +1376,7 @@ def hitl_approval_node(state: AgentState):
     # In production, this would pause and wait for frontend callback
     # ═══════════════════════════════════════════════════════════════════════════
     if web_hitl_handler is None:
-        print("   No web HITL handler configured. Auto-approving post-search checkpoint.")
+        print("  [HITL] No web HITL handler — auto-approving.")
         return {
             "hitl_approved": True,
             "hitl_message": "Auto-approved (no web HITL handler)."
@@ -1392,13 +1394,13 @@ def hitl_approval_node(state: AgentState):
     reason = str(decision.get("reason", ""))
 
     if approved:
-        print("   Web search results approved by user.")
+        print("  [HITL] Web search results approved.")
         return {
             "hitl_approved": True,
             "hitl_message": "Approved web search results."
         }
 
-    print("   User rejected web results. Stopping pipeline.")
+    print("  [HITL] User rejected web results.")
     return {
         "hitl_approved": False,
         "hitl_message": reason or "User rejected web search results",
@@ -1411,10 +1413,10 @@ def web_search_intent_hitl_node(state: AgentState):
     HITL checkpoint before executing web search fallback.
     Requires explicit user approval to run external search.
     """
-    print("--- 👤 HITL Checkpoint: Web Search Approval (Pre-Search) ---")
+    print("[HITL] Pre-Web-Search Approval checkpoint")
 
     if web_hitl_handler is None:
-        print("   ⚠️ No web HITL handler configured. Auto-approving pre-search checkpoint.")
+        print("  [HITL] No web HITL handler — auto-approving pre-search.")
         return {
             "hitl_approved": True,
             "hitl_message": "Auto-approved (no web HITL handler)."
@@ -1431,13 +1433,13 @@ def web_search_intent_hitl_node(state: AgentState):
     reason = str(decision.get("reason", ""))
 
     if approved:
-        print("   ✅ Web search approved by user.")
+        print("  [HITL] Web search approved.")
         return {
             "hitl_approved": True,
             "hitl_message": "Approved web search execution."
         }
 
-    print("   ❌ Web search rejected by user.")
+    print("  [HITL] Web search rejected by user.")
     return {
         "hitl_approved": False,
         "hitl_message": reason or "User rejected web search execution.",
@@ -1497,7 +1499,7 @@ def retrieval_hitl_node(state: AgentState):
     HITL checkpoint after grader marks local retrieval as relevant.
     User must approve/reject the citation set before generation.
     """
-    print("--- 👤 HITL Checkpoint: Retrieval Citation Review ---")
+    print("[HITL] Retrieval Citation Review checkpoint")
     citations = state.get("graded_citations", [])
     if not citations:
         evidence = state.get("evidence", []) or _build_evidence_records(state.get("documents", []))
@@ -1511,7 +1513,7 @@ def retrieval_hitl_node(state: AgentState):
         }
 
     if retrieval_hitl_handler is None:
-        print("   ⚠️ No retrieval HITL handler configured. Auto-approving.")
+        print("  [HITL] No retrieval HITL handler — auto-approving.")
         return {
             "graded_citations": citations,
             "hitl_approved": True,
@@ -1528,14 +1530,14 @@ def retrieval_hitl_node(state: AgentState):
     reason = str(decision.get("reason", ""))
 
     if approved:
-        print("   ✅ Retrieval citations approved.")
+        print("  [HITL] Retrieval citations approved.")
         return {
             "graded_citations": citations,
             "hitl_approved": True,
             "hitl_message": "Approved retrieval citations."
         }
 
-    print("   ❌ Retrieval citations rejected.")
+    print("  [HITL] Retrieval citations rejected.")
     return {
         "graded_citations": citations,
         "hitl_approved": False,
@@ -1553,7 +1555,7 @@ def critic_node(state: AgentState):
     1. DeepSeek-R1: Performs deep, unstructured analysis against the rubric.
     2. Qwen-2.5/3: Extracts that analysis into a strict JSON schema for routing.
     """
-    print("--- 🧐 Critic: Reviewing Draft (Decoupled Loop) ---")
+    print("[CRITIC] Reviewing draft quality")
 
     answer = state.get('answer', "")
     topic = state['topic']
@@ -1561,7 +1563,7 @@ def critic_node(state: AgentState):
     
     # Handle missing answer gracefully
     if not answer:
-        print("   ⚠️ No answer to critique. Passing through.")
+        print("  [CRITIC] No answer to critique — passing through.")
         return {
             "critique_feedback": ["No content to review"],
             "critique_praise": "N/A",
@@ -1650,35 +1652,110 @@ def critic_node(state: AgentState):
         result = CritiqueResponse(score=8, feedback="LLM unavailable, accepting.", 
                                    what_to_keep="All sections", accepted=True)
 
-    print(f"   📊 Score: {result.score}/10 | Accepted: {result.accepted}")
+    print(f"  [CRITIC] Score: {result.score}/10 | Accepted: {result.accepted}")
 
     return {
         "critique_feedback": [result.feedback],
         "critique_praise": result.what_to_keep,
         "revision_count": state.get("revision_count", 0) + 1,
-        "is_relevant": result.accepted 
+        "is_relevant": result.accepted,
+        "critic_score": result.score
     }
 
 
+
+def draft_review_hitl_node(state: AgentState):
+    """
+    HITL checkpoint after Critic rejects a draft.
+    Shows the user the current draft, critic feedback, score, and code logs
+    so they can review, edit, or override before the Writer regenerates.
+    """
+    print("[HITL] Draft Review checkpoint")
+
+    answer = state.get("answer", "")
+    feedback = state.get("critique_feedback", [])
+    praise = state.get("critique_praise", "")
+    revision_count = state.get("revision_count", 0)
+    code_logs = state.get("code_execution_logs", "")
+
+    # Derive a score from the feedback text (critic returns it in state)
+    # The critic node sets is_relevant=False when score < 8, so we can
+    # infer a rough score. For transparency we'll pass the raw feedback.
+    # Read the score from state (set by critic node)
+    critic_score = state.get("critic_score", None)
+
+    if draft_hitl_handler is None:
+        print("  [HITL] No draft HITL handler — auto-approving.")
+        return {
+            "hitl_approved": True,
+            "hitl_message": "Auto-approved (no draft HITL handler).",
+        }
+
+    decision = draft_hitl_handler(
+        job_id=state.get("job_id", ""),
+        topic=state.get("topic", ""),
+        current_draft=answer,
+        critic_feedback=feedback,
+        critic_praise=praise,
+        critic_score=critic_score,
+        code_execution_logs=code_logs,
+        iteration_count=revision_count,
+    ) or {}
+
+    approved = bool(decision.get("approved", True))
+    reason = str(decision.get("reason", ""))
+    edited_draft = str(decision.get("edited_text", "") or "").strip()
+    edited_feedback = decision.get("edited_feedback")
+
+    if not approved:
+        # User chose "Keep as Final" or rejected further iteration
+        print("  [HITL] User accepted current draft as final.")
+        return {
+            "hitl_approved": False,
+            "hitl_message": reason or "User accepted current draft as final.",
+            "is_relevant": True,  # Override critic - mark as accepted
+        }
+
+    # User wants another revision
+    updates: Dict[str, Any] = {
+        "hitl_approved": True,
+        "hitl_message": "Draft review approved. Sending to writer for revision.",
+    }
+    if edited_draft:
+        print("  [HITL] Applying user-edited draft.")
+        updates["answer"] = edited_draft
+    if edited_feedback:
+        print("  [HITL] Applying user-edited feedback.")
+        updates["critique_feedback"] = edited_feedback if isinstance(edited_feedback, list) else [edited_feedback]
+
+    return updates
+
+
+def route_from_draft_hitl(state: AgentState) -> str:
+    """Routes after draft review HITL checkpoint."""
+    if state.get("hitl_approved", False):
+        return "generate"
+    return END
 
 
 # --- 4. Routing Logic ---
 def route_from_critic(state: AgentState):
     """
     Decides whether to loop back to the writer or finish.
+    Now routes rejected drafts through the draft_review_hitl checkpoint.
     """
-    accepted = state.get('is_relevant') # Using the bool from critic
+    accepted = state.get('is_relevant')  # Using the bool from critic
     revisions = state.get('revision_count', 0)
 
     if accepted:
-        print("   ✅ Critic approved. Finishing.")
+        print("  [CRITIC] Approved. Finishing.")
         return END
     elif revisions >= 3:
-        print("   ⚠️ Max revisions reached. Finishing despite critique.")
+        print("  [CRITIC] Max revisions reached. Finishing.")
         return END
     else:
-        print("   ↩️ Sending back to Writer for revision.")
-        return "generate"
+        print("  [CRITIC] Sending to draft review HITL.")
+        return "draft_review_hitl"
 
 
 
@@ -1726,7 +1803,7 @@ class LocalSafeExecutor:
         # 1. Guardrail Check
         is_safe, error_msg = self._is_safe(code)
         if not is_safe:
-            print(f"   🛡️ Guardrail Blocked Execution: {error_msg}")
+            print(f"  [SANDBOX] Blocked: {error_msg}")
             return f"ERROR: {error_msg}"
 
         # 2. Execution (if safe)
@@ -1750,11 +1827,11 @@ def code_tester_node(state: AgentState):
     2. Executes them in the Sandbox.
     3. If error -> Calls 'Fixer' LLM -> Replaces code in article.
     """
-    print("--- 🧪 Test Engineer: Verifying Code Snippets ---")
+    print("[CODE_TEST] Verifying code snippets")
 
     answer = state.get('answer', "")
     if not answer:
-        print("   ⚠️ No answer to test. Skipping.")
+        print("  [CODE_TEST] No answer to test — skipping.")
         return {"code_execution_logs": "No content to test."}
 
     # Regex to find python code blocks
@@ -1763,11 +1840,11 @@ def code_tester_node(state: AgentState):
     try:
         matches = list(re.finditer(code_pattern, answer, re.DOTALL))
     except Exception as e:
-        print(f"   ⚠️ Regex parsing failed: {e}. Skipping code testing.")
+        print(f"  [CODE_TEST] Regex parsing failed: {e}. Skipping.")
         return {"code_execution_logs": f"Regex error: {e}"}
 
     if not matches:
-        print("   ⚠️ No code blocks found to test.")
+        print("  [CODE_TEST] No code blocks found.")
         return {"code_execution_logs": "No code blocks."}
 
     new_answer = answer
@@ -1796,7 +1873,7 @@ def code_tester_node(state: AgentState):
 
             # 2. Check if we should attempt a fix
             if should_attempt_fix(output, failed_fixes, MAX_FIX_FAILURES):
-                print(f"   ❌ Code failed. Attempting Self-Correction...")
+                print("  [CODE_TEST] Code failed — attempting self-correction.")
 
                 # 3. The Fixing Loop with safe invoke
                 llm_fixer = ChatOllama(model="qwen3:8b", temperature=0.2, num_ctx=8192)
@@ -1881,6 +1958,7 @@ workflow.add_node("hitl_approval", traceable(hitl_approval_node))  # HITL checkp
 workflow.add_node("generate", traceable(generate_answer_node))
 workflow.add_node("code_tester", traceable(code_tester_node))
 workflow.add_node("critic", traceable(critic_node))
+workflow.add_node("draft_review_hitl", traceable(draft_review_hitl_node))
 workflow.add_node("increment_retry", traceable(increment_retry_node))
 
 # --- 3. Define Edges ---
@@ -1938,7 +2016,11 @@ workflow.add_conditional_edges("generate", route_from_generate, {
 })
 workflow.add_edge("code_tester", "critic")
 workflow.add_conditional_edges("critic", route_from_critic, {
-    "generate": "generate", 
+    "draft_review_hitl": "draft_review_hitl",
+    END: END
+})
+workflow.add_conditional_edges("draft_review_hitl", route_from_draft_hitl, {
+    "generate": "generate",
     END: END
 })
 
@@ -1957,6 +2039,7 @@ reasoning_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
 blueprint_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
 grader_stream_handler: Optional[Callable[..., None]] = None
 web_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
+draft_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
 
 def set_vectorstore(vs):
     """
@@ -2038,6 +2121,16 @@ def set_web_hitl_handler(handler: Optional[Callable[..., Dict[str, Any]]]):
     web_hitl_handler = handler
 
 
+def set_draft_hitl_handler(handler: Optional[Callable[..., Dict[str, Any]]]):
+    """
+    Set callback for draft-review HITL decisions.
+    Expected callback result:
+      {"approved": bool, "reason": str, "edited_text": str, "edited_feedback": list|str}
+    """
+    global draft_hitl_handler
+    draft_hitl_handler = handler
+
+
 # EXPORTS FOR BACKEND INTEGRATION
 
 __all__ = [
@@ -2056,6 +2149,7 @@ __all__ = [
     "set_blueprint_hitl_handler",
     "set_grader_stream_handler",
     "set_web_hitl_handler",
+    "set_draft_hitl_handler",
     "SOURCE_FILES",
     "DB_PATH",
     # Document Processing
@@ -2079,6 +2173,8 @@ __all__ = [
     "route_from_query_plan_hitl",
     "route_from_grader_with_web",
     "route_from_critic",
+    "route_from_draft_hitl",
+    "draft_review_hitl_node",
     "route_from_guardrail",
     "route_from_hitl",
     "route_from_web_intent_hitl",

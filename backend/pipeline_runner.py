@@ -48,6 +48,7 @@ class PipelineJob:
     hitl_approved: Optional[bool] = None
     hitl_rejection_reason: Optional[str] = None  # User feedback on rejection
     hitl_edited_text: Optional[str] = None
+    hitl_edited_feedback: Optional[list] = None  # Edited critic feedback for draft_review
     # Query plan HITL state
     query_plan_data: Optional[Dict[str, Any]] = None
     query_plan_event: Optional[threading.Event] = None
@@ -96,6 +97,7 @@ class PipelineRunner:
             "generate": "Answer Generation",
             "code_tester": "Code Testing",
             "critic": "Quality Review",
+            "draft_review_hitl": "Draft Review",
             "increment_retry": "Retry Planning",
             "summarize": "Summarization",
         }
@@ -129,6 +131,7 @@ class PipelineRunner:
                 set_reasoning_hitl_handler,
                 set_blueprint_hitl_handler,
                 set_web_hitl_handler,
+                set_draft_hitl_handler,
                 set_grader_stream_handler,
                 SOURCE_FILES,
                 tracer
@@ -151,6 +154,7 @@ class PipelineRunner:
             set_blueprint_hitl_handler(self._handle_blueprint_hitl)
             set_web_hitl_handler(self._handle_web_hitl)
             set_grader_stream_handler(self._handle_grader_stream)
+            set_draft_hitl_handler(self._handle_draft_hitl)
             
             self._pipeline_ready = True
             print(f"✅ Pipeline initialized with {len(self._categories)} categories")
@@ -672,6 +676,77 @@ class PipelineRunner:
         reason = job.hitl_rejection_reason or "User rejected blueprint review."
         return {"approved": False, "reason": reason, "edited_text": ""}
 
+    def _handle_draft_hitl(
+        self,
+        job_id: str,
+        topic: str,
+        current_draft: str,
+        critic_feedback: list = None,
+        critic_praise: str = "",
+        critic_score: int = None,
+        code_execution_logs: str = "",
+        iteration_count: int = 0,
+    ) -> Dict[str, Any]:
+        """Blocking callback for draft review HITL after critic rejects."""
+        job = self.jobs.get(job_id)
+        if not job:
+            return {"approved": True, "reason": "Job not found; auto-approved"}
+
+        job.status = JobStatus.HITL_WAITING
+        job.hitl_edited_text = None
+        job.hitl_edited_feedback = None
+        job.hitl_data = {
+            "hitl_type": "draft_review",
+            "job_id": job_id,
+            "query": topic,
+            "current_draft": (current_draft or "")[:30000],
+            "editable_text": (current_draft or "")[:30000],
+            "critic_feedback": critic_feedback or [],
+            "critic_praise": critic_praise or "",
+            "critic_score": critic_score,
+            "code_execution_logs": (code_execution_logs or "")[:5000],
+            "iteration_count": iteration_count,
+            "results": [],
+            "search_results": [],
+            "total_results_found": 0,
+            "results_shown": 0,
+            "search_depth": "draft",
+            "search_latency_ms": 0.0,
+            "reason": f"Critic rejected draft (iteration #{iteration_count}). Review feedback before revision.",
+            "message": "Review the critic's feedback. Apply changes, edit the draft, or keep as final.",
+        }
+        if job.hitl_event is None:
+            job.hitl_event = threading.Event()
+        else:
+            job.hitl_event.clear()
+
+        loop = self._main_loop
+        if loop is None:
+            return {"approved": True, "reason": "No loop; auto-approved"}
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._emit_event(job, "hitl_pending", job.hitl_data),
+                loop
+            ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+        except Exception:
+            pass
+
+        job.hitl_event.wait(timeout=self.QUERY_PLAN_WAIT_TIMEOUT_S)
+
+        if job.hitl_approved:
+            job.status = JobStatus.RUNNING
+            return {
+                "approved": True,
+                "reason": "",
+                "edited_text": job.hitl_edited_text or "",
+                "edited_feedback": job.hitl_edited_feedback,
+            }
+
+        # For draft_review, rejection = "keep current draft as final"
+        reason = job.hitl_rejection_reason or "User accepted current draft as final."
+        return {"approved": False, "reason": reason}
+
     async def _run_llm_job(self, job: PipelineJob):
         """Run a lightweight LLM-only response (no retrieval)."""
         await self._emit_pipeline_start(job)
@@ -943,6 +1018,7 @@ class PipelineRunner:
         job.hitl_approved = True
         job.hitl_rejection_reason = None
         job.hitl_edited_text = str(edited_text).strip() if edited_text else None
+        job.hitl_edited_feedback = None  # Reset on each approve
         job.status = JobStatus.RUNNING
         job.hitl_event.set()  # Unblock pipeline
         await self._emit_event(job, "hitl_approved", {

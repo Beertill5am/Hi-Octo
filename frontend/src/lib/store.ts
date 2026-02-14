@@ -229,7 +229,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     if (!options?.skipUserMessage) {
       get().addMessage("user", topic, { runId: jobId });
     }
-    get().addMessage("system", "🚀 Pipeline started...");
+    get().addMessage("system", "Working on your request…");
   },
   
   handleSSEEvent: (event: SSEEvent) => {
@@ -288,14 +288,16 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         const hitlType = raw.hitl_type as string | undefined;
         const statusMessage =
           hitlType === "retrieval_review"
-            ? "Waiting for your approval on retrieved citations before generation..."
+            ? "📋 Please review the sources before I generate your answer."
             : hitlType === "pre_web_search_review"
-            ? "Waiting for your approval to run web search..."
+            ? "🌐 Ready to search the web — your approval is needed."
             : hitlType === "reasoning_review"
-            ? "Waiting for your review of model reasoning before draft generation..."
+            ? "🧠 Review my reasoning before I start drafting."
             : hitlType === "blueprint_review"
-            ? "Waiting for your review of the blueprint before article generation..."
-            : "Waiting for your approval on web search results...";
+            ? "📝 Blueprint ready — please review before I write the article."
+            : hitlType === "draft_review"
+            ? "✏️ Draft reviewed by critic — your feedback is needed."
+            : "🔍 Search results ready for your review.";
         get().addMessage("system", statusMessage);
         break;
       }
@@ -306,7 +308,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           queryPlanData: data as unknown as QueryPlanPendingData,
           showQueryPlanModal: true,
         });
-        get().addMessage("system", "⏸️ Review generated search queries before retrieval.");
+        get().addMessage("system", "📋 Review the search plan before I begin retrieval.");
         break;
 
       case "query_plan_approved":
@@ -314,7 +316,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           status: "running",
           showQueryPlanModal: false,
         });
-        get().addMessage("system", "✅ Query plan approved. Starting retrieval.");
+        get().addMessage("system", "Plan approved — starting retrieval.");
         break;
 
       case "query_plan_rejected":
@@ -323,7 +325,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           showQueryPlanModal: false,
           answerStreaming: false,
         });
-        get().addMessage("system", `❌ Query plan rejected: ${String(data.reason || "User rejected")}`);
+        get().addMessage("system", `Plan declined${data.reason ? `: ${String(data.reason)}` : "."}`);
         break;
 
       case "answer_token":
@@ -489,7 +491,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           answerStreaming: false,
         });
         // Add error with recovery quick actions
-        get().addMessage("system", `❌ Error: ${data.error}`, {
+        get().addMessage("system", `Something went wrong — ${data.error}`, {
           recoveryData: query ? { query, modes: ["llm", "web"] as RunMode[] } : undefined,
           runId: get().jobId || undefined,
         });
@@ -502,7 +504,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
 
       case "cancelled":
         set({ status: "failed", reasoningDone: true, answerStreaming: false });
-        get().addMessage("system", `⛔ Cancelled: ${String(data.reason || "Pipeline cancelled")}`);
+        get().addMessage("system", `Cancelled${data.reason ? ` — ${String(data.reason)}` : "."}`);
         break;
     }
   },

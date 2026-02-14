@@ -9,6 +9,30 @@ import { TypewriterText } from "./TypewriterText";
 import { QuickReplies } from "./QuickReplies";
 import { WebSearchResultsInline } from "./WebSearchResultsInline";
 import { HITLModal } from "./HITLModal";
+import { QueryPlanModal } from "./QueryPlanModal";
+import { ChevronDown, ChevronRight } from "lucide-react";
+
+function ThinkingBlock({ label, text }: { label: string; text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-1">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-400 transition-colors cursor-pointer"
+      >
+        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <span className="text-zinc-400">💭</span>
+        <span>{label}</span>
+      </button>
+      {open && (
+        <div className="mt-1 ml-5 text-xs italic text-zinc-500 whitespace-pre-wrap border-l-2 border-zinc-800 pl-3">
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function MessageBubble({
   message,
@@ -53,12 +77,10 @@ function MessageBubble({
           {message.hitlSnapshot ? (
             <HITLModal snapshot={message.hitlSnapshot} readOnly />
           ) : message.thinkingChapter ? (
-            <div className="mb-1 text-xs italic text-zinc-500">
-              <span className="mr-2 text-zinc-400">
-                {message.thinkingChapter.phase === "reasoning" ? "Reasoning:" : "Thinking:"}
-              </span>
-              <span className="whitespace-pre-wrap">{message.thinkingChapter.text}</span>
-            </div>
+            <ThinkingBlock
+              label={message.thinkingChapter.phase === "reasoning" ? "Reasoning" : "Thinking"}
+              text={message.thinkingChapter.text}
+            />
           ) : message.webResults ? (
             <WebSearchResultsInline
               results={message.webResults.results}
@@ -155,9 +177,6 @@ function MessageBubble({
             query={message.quickReplyData.query}
             resourceCount={message.quickReplyData.resourceCount}
             modes={message.quickReplyData.modes}
-            showHeader={message.quickReplyData.showHeader}
-            headerTitle={message.quickReplyData.headerTitle}
-            headerDescription={message.quickReplyData.headerDescription}
             disabled={disableActions}
           />
         )}
@@ -168,9 +187,6 @@ function MessageBubble({
             messageId={message.id}
             query={message.recoveryData.query}
             modes={message.recoveryData.modes}
-            showHeader
-            headerTitle="Quick retry"
-            headerDescription="Retry with an alternate source without retyping your question."
             disabled={disableActions}
           />
         )}
@@ -191,6 +207,7 @@ export function ChatHistory() {
     hitlData,
     showHITLModal,
     graderThinking,
+    showQueryPlanModal,
   } = usePipelineStore();
   const bottomRef = useRef<HTMLDivElement>(null);
   const disableInlineHistory = status === "hitl_waiting";
@@ -232,13 +249,12 @@ export function ChatHistory() {
         />
       ))}
       {graderThinking.text && (status === "running" || status === "hitl_waiting") && (
-        <div className="mb-5 text-xs italic text-zinc-500">
-          <span className="mr-2 text-zinc-400">
-            {graderThinking.phase === "reasoning" ? "Reasoning:" : "Thinking:"}
-          </span>
-          <TypewriterText text={graderThinking.text} speed={2} />
-        </div>
+        <ThinkingBlock
+          label={graderThinking.phase === "reasoning" ? "Reasoning" : "Thinking"}
+          text={graderThinking.text}
+        />
       )}
+      {showQueryPlanModal && <QueryPlanModal />}
       {(showHITLModal || (status === "hitl_waiting" && !!hitlData)) && <HITLModal />}
       {answerStreaming && streamingAnswer && (
         <div className="flex justify-start mb-6">
