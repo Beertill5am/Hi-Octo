@@ -55,6 +55,9 @@ async def get_pending_hitl(job_id: str):
         hitl_type=hitl_type,
         query=job.topic,
         ai_summary=hitl_data.get("ai_answer"),
+        reasoning_text=hitl_data.get("reasoning_text"),
+        blueprint_text=hitl_data.get("blueprint_text"),
+        editable_text=hitl_data.get("editable_text"),
         search_results=search_results,
         total_results_found=hitl_data.get("total_results_found", len(search_results)),
         results_shown=len(search_results),
@@ -68,6 +71,10 @@ async def get_pending_hitl(job_id: str):
             if hitl_type == "retrieval_review"
             else "Approve web search before execution"
             if hitl_type == "pre_web_search_review"
+            else "Review model reasoning before draft generation"
+            if hitl_type == "reasoning_review"
+            else "Review the blueprint before article generation"
+            if hitl_type == "blueprint_review"
             else "Review these web search results before generation"
         )
     )
@@ -79,8 +86,9 @@ async def approve_hitl(job_id: str, decision: HITLDecision = None):
     Approve HITL checkpoint and continue pipeline.
     """
     feedback = decision.feedback if decision else None
+    edited_text = decision.edited_text if decision else None
     
-    success = await runner.approve_hitl(job_id, feedback)
+    success = await runner.approve_hitl(job_id, feedback, edited_text)
     if not success:
         job = runner.get_job(job_id)
         if not job:

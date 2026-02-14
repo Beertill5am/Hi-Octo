@@ -18,10 +18,13 @@ export function TypewriterText({
   const [displayedText, setDisplayedText] = useState("");
   const [prevText, setPrevText] = useState(text);
 
-  // Reset when text changes
+  // For incremental streaming updates, keep progress.
+  // Reset only when incoming text is a replacement (not an append).
   if (text !== prevText) {
+    if (!text.startsWith(prevText)) {
+      setDisplayedText("");
+    }
     setPrevText(text);
-    setDisplayedText("");
   }
 
   useEffect(() => {

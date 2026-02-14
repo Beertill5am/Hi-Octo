@@ -47,6 +47,7 @@ class PipelineJob:
     hitl_event: Optional[threading.Event] = None
     hitl_approved: Optional[bool] = None
     hitl_rejection_reason: Optional[str] = None  # User feedback on rejection
+    hitl_edited_text: Optional[str] = None
     # Query plan HITL state
     query_plan_data: Optional[Dict[str, Any]] = None
     query_plan_event: Optional[threading.Event] = None
@@ -125,6 +126,8 @@ class PipelineRunner:
                 set_query_plan_hitl_handler,
                 set_answer_token_stream_handler,
                 set_retrieval_hitl_handler,
+                set_reasoning_hitl_handler,
+                set_blueprint_hitl_handler,
                 set_web_hitl_handler,
                 set_grader_stream_handler,
                 SOURCE_FILES,
@@ -144,6 +147,8 @@ class PipelineRunner:
             set_query_plan_hitl_handler(self._handle_query_plan_hitl)
             set_answer_token_stream_handler(self._handle_answer_token_stream)
             set_retrieval_hitl_handler(self._handle_retrieval_hitl)
+            set_reasoning_hitl_handler(self._handle_reasoning_hitl)
+            set_blueprint_hitl_handler(self._handle_blueprint_hitl)
             set_web_hitl_handler(self._handle_web_hitl)
             set_grader_stream_handler(self._handle_grader_stream)
             
@@ -420,6 +425,7 @@ class PipelineRunner:
             return {"approved": True, "reason": "Job not found; auto-approved"}
 
         job.status = JobStatus.HITL_WAITING
+        job.hitl_edited_text = None
         job.hitl_data = {
             "hitl_type": "retrieval_review",
             "job_id": job_id,
@@ -478,6 +484,7 @@ class PipelineRunner:
         is_pre_search = phase == "pre_web_search"
 
         job.status = JobStatus.HITL_WAITING
+        job.hitl_edited_text = None
         job.hitl_data = {
             "hitl_type": "pre_web_search_review" if is_pre_search else "web_search_review",
             "job_id": job_id,
@@ -531,6 +538,139 @@ class PipelineRunner:
             else "User rejected web search results."
         )
         return {"approved": False, "reason": reason}
+
+    def _handle_reasoning_hitl(
+        self,
+        job_id: str,
+        topic: str,
+        selected_category: str,
+        reasoning_text: str,
+        editable_text: str = "",
+        search_results: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """Blocking callback for post-reasoning review before full draft generation."""
+        job = self.jobs.get(job_id)
+        if not job:
+            return {"approved": True, "reason": "Job not found; auto-approved", "edited_text": ""}
+
+        normalized_results = search_results or []
+        summary_preview = (reasoning_text or "").strip()[:1800]
+        editable_preview = (editable_text or reasoning_text or "").strip()[:4000]
+
+        job.status = JobStatus.HITL_WAITING
+        job.hitl_edited_text = None
+        job.hitl_data = {
+            "hitl_type": "reasoning_review",
+            "job_id": job_id,
+            "query": topic,
+            "ai_answer": summary_preview,
+            "reasoning_text": (reasoning_text or "").strip()[:12000],
+            "editable_text": editable_preview,
+            "selected_category": selected_category,
+            "results": normalized_results,
+            "search_results": normalized_results,
+            "total_results_found": len(normalized_results),
+            "results_shown": len(normalized_results),
+            "search_depth": "reasoning",
+            "search_latency_ms": 0.0,
+            "reason": "Reasoning phase completed. Review before full draft generation.",
+            "message": "Review model reasoning. Accept, reject, or edit before draft generation.",
+        }
+        if job.hitl_event is None:
+            job.hitl_event = threading.Event()
+        else:
+            job.hitl_event.clear()
+
+        loop = self._main_loop
+        if loop is None:
+            return {"approved": True, "reason": "No loop; auto-approved", "edited_text": ""}
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._emit_event(job, "hitl_pending", job.hitl_data),
+                loop
+            ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+        except Exception:
+            pass
+
+        job.hitl_event.wait(timeout=self.QUERY_PLAN_WAIT_TIMEOUT_S)
+
+        if job.hitl_approved:
+            job.status = JobStatus.RUNNING
+            return {
+                "approved": True,
+                "reason": "",
+                "edited_text": job.hitl_edited_text or "",
+            }
+
+        reason = job.hitl_rejection_reason or "User rejected reasoning review."
+        return {"approved": False, "reason": reason, "edited_text": ""}
+
+    def _handle_blueprint_hitl(
+        self,
+        job_id: str,
+        topic: str,
+        selected_category: str,
+        reasoning_text: str,
+        blueprint_text: str = "",
+        editable_text: str = "",
+    ) -> Dict[str, Any]:
+        """Blocking callback for post-blueprint review before full draft generation."""
+        job = self.jobs.get(job_id)
+        if not job:
+            return {"approved": True, "reason": "Job not found; auto-approved", "edited_text": ""}
+
+        blueprint_preview = (blueprint_text or "").strip()[:12000]
+        editable_preview = (editable_text or blueprint_text or "").strip()[:12000]
+
+        job.status = JobStatus.HITL_WAITING
+        job.hitl_edited_text = None
+        job.hitl_data = {
+            "hitl_type": "blueprint_review",
+            "job_id": job_id,
+            "query": topic,
+            "reasoning_text": (reasoning_text or "").strip()[:6000],
+            "blueprint_text": blueprint_preview,
+            "editable_text": editable_preview,
+            "selected_category": selected_category,
+            "results": [],
+            "search_results": [],
+            "total_results_found": 0,
+            "results_shown": 0,
+            "search_depth": "blueprint",
+            "search_latency_ms": 0.0,
+            "reason": "Blueprint generated. Review structure before full article generation.",
+            "message": "Review the blueprint. Accept, reject, or edit before article generation.",
+        }
+        if job.hitl_event is None:
+            job.hitl_event = threading.Event()
+        else:
+            job.hitl_event.clear()
+
+        loop = self._main_loop
+        if loop is None:
+            return {"approved": True, "reason": "No loop; auto-approved", "edited_text": ""}
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._emit_event(job, "hitl_pending", job.hitl_data),
+                loop
+            ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
+        except Exception:
+            pass
+
+        job.hitl_event.wait(timeout=self.QUERY_PLAN_WAIT_TIMEOUT_S)
+
+        if job.hitl_approved:
+            job.status = JobStatus.RUNNING
+            return {
+                "approved": True,
+                "reason": "",
+                "edited_text": job.hitl_edited_text or "",
+            }
+
+        reason = job.hitl_rejection_reason or "User rejected blueprint review."
+        return {"approved": False, "reason": reason, "edited_text": ""}
 
     async def _run_llm_job(self, job: PipelineJob):
         """Run a lightweight LLM-only response (no retrieval)."""
@@ -792,7 +932,7 @@ class PipelineRunner:
         """Get job by ID."""
         return self.jobs.get(job_id)
     
-    async def approve_hitl(self, job_id: str, feedback: str = None) -> bool:
+    async def approve_hitl(self, job_id: str, feedback: str = None, edited_text: str = None) -> bool:
         """Approve HITL checkpoint and continue pipeline."""
         job = self.jobs.get(job_id)
         if not job or job.status != JobStatus.HITL_WAITING:
@@ -802,9 +942,13 @@ class PipelineRunner:
         
         job.hitl_approved = True
         job.hitl_rejection_reason = None
+        job.hitl_edited_text = str(edited_text).strip() if edited_text else None
         job.status = JobStatus.RUNNING
         job.hitl_event.set()  # Unblock pipeline
-        await self._emit_event(job, "hitl_approved", {"feedback": feedback})
+        await self._emit_event(job, "hitl_approved", {
+            "feedback": feedback,
+            "edited_text": job.hitl_edited_text,
+        })
         return True
 
     async def approve_query_plan(self, job_id: str, edited_queries: list = None, feedback: str = None) -> bool:
@@ -847,6 +991,7 @@ class PipelineRunner:
         
         job.hitl_approved = False
         job.hitl_rejection_reason = reason or "User rejected"
+        job.hitl_edited_text = None
         job.status = JobStatus.CANCELLED
         job.hitl_event.set()
         await self._emit_event(job, "cancelled", {"reason": reason or "User rejected"})

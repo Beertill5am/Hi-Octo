@@ -1083,6 +1083,26 @@ def generate_answer_node(state: AgentState):
         """
         raw_plan = llm_reasoning.invoke(plan_prompt).content
         display_model_thoughts(raw_plan)
+        if grader_stream_handler is not None:
+            try:
+                public_reasoning = sanitize_public_reasoning(str(raw_plan or ""), max_chars=5000)
+                for idx, chunk in enumerate(chunk_text_for_stream(public_reasoning, chunk_size=220), start=1):
+                    grader_stream_handler(
+                        job_id=state.get("job_id", ""),
+                        text=chunk,
+                        phase="reasoning",
+                        done=False,
+                        meta={"chunk": idx, "replace": idx == 1},
+                    )
+                grader_stream_handler(
+                    job_id=state.get("job_id", ""),
+                    text="Reasoning phase complete. Awaiting review checkpoint.",
+                    phase="reasoning",
+                    done=True,
+                    meta={"replace": False},
+                )
+            except Exception as e:
+                print(f"   ⚠️ Reasoning stream warning: {e}")
 
         # --- B. BLUEPRINT (Qwen) ---
         llm_architect = ChatOllama(model="qwen3:8b", temperature=0.6, num_ctx=8192)
@@ -1109,6 +1129,71 @@ def generate_answer_node(state: AgentState):
         """
         current_blueprint = llm_architect.invoke(architect_prompt).content
         display_model_thoughts(current_blueprint)
+
+        review_sources: List[Dict[str, Any]] = list(state.get("graded_citations", []) or [])
+        if not review_sources:
+            web_results = state.get("web_search_results", []) or []
+            normalized_results: List[Dict[str, Any]] = []
+            for idx, result in enumerate(web_results[:10], start=1):
+                item = _normalize_web_result_item(result)
+                item["source_id"] = f"Source #{idx}"
+                normalized_results.append(item)
+            review_sources = normalized_results
+
+        if reasoning_hitl_handler is None:
+            print("   ⚠️ No reasoning HITL handler configured. Auto-approving reasoning review.")
+        else:
+            decision = reasoning_hitl_handler(
+                job_id=state.get("job_id", ""),
+                topic=state.get("topic", ""),
+                selected_category=state.get("selected_category", ""),
+                reasoning_text=str(raw_plan or ""),
+                editable_text=str(current_blueprint or ""),
+                search_results=review_sources,
+            ) or {}
+            approved = bool(decision.get("approved", True))
+            reason = str(decision.get("reason", ""))
+            edited_text = str(decision.get("edited_text", "") or "").strip()
+
+            if not approved:
+                print("   ❌ Reasoning review rejected.")
+                return {
+                    "hitl_approved": False,
+                    "hitl_message": reason or "User rejected reasoning review.",
+                    "answer": "Generation cancelled because reasoning review was rejected.",
+                }
+
+            if edited_text:
+                print("   ✍️ Applying user-edited reasoning blueprint.")
+                current_blueprint = edited_text
+
+        # --- C. BLUEPRINT HITL CHECKPOINT ---
+        if blueprint_hitl_handler is None:
+            print("   ⚠️ No blueprint HITL handler configured. Auto-approving blueprint review.")
+        else:
+            bp_decision = blueprint_hitl_handler(
+                job_id=state.get("job_id", ""),
+                topic=state.get("topic", ""),
+                selected_category=state.get("selected_category", ""),
+                reasoning_text=str(raw_plan or ""),
+                blueprint_text=str(current_blueprint or ""),
+                editable_text=str(current_blueprint or ""),
+            ) or {}
+            bp_approved = bool(bp_decision.get("approved", True))
+            bp_reason = str(bp_decision.get("reason", ""))
+            bp_edited = str(bp_decision.get("edited_text", "") or "").strip()
+
+            if not bp_approved:
+                print("   ❌ Blueprint review rejected.")
+                return {
+                    "hitl_approved": False,
+                    "hitl_message": bp_reason or "User rejected blueprint review.",
+                    "answer": "Generation cancelled because blueprint review was rejected.",
+                }
+
+            if bp_edited:
+                print("   ✍️ Applying user-edited blueprint.")
+                current_blueprint = bp_edited
 
     else:
         print(f"   🔄 Revision #{revision_count}: Skipping Blueprinting. Using existing plan.")
@@ -1365,6 +1450,13 @@ def route_from_hitl(state: AgentState) -> str:
     if state.get('hitl_approved', False):
         return "generate"
     return "end_node"
+
+
+def route_from_generate(state: AgentState) -> str:
+    """Route after generation; stop if reasoning HITL rejected."""
+    if state.get("hitl_approved") is False:
+        return END
+    return "code_tester"
 
 
 def route_from_web_intent_hitl(state: AgentState) -> str:
@@ -1840,7 +1932,10 @@ workflow.add_conditional_edges("hitl_approval", route_from_hitl, {
 })
 
 # Production Loop
-workflow.add_edge("generate", "code_tester")
+workflow.add_conditional_edges("generate", route_from_generate, {
+    "code_tester": "code_tester",
+    END: END,
+})
 workflow.add_edge("code_tester", "critic")
 workflow.add_conditional_edges("critic", route_from_critic, {
     "generate": "generate", 
@@ -1858,6 +1953,8 @@ vectorstore = None
 query_plan_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
 answer_token_stream_handler: Optional[Callable[..., None]] = None
 retrieval_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
+reasoning_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
+blueprint_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
 grader_stream_handler: Optional[Callable[..., None]] = None
 web_hitl_handler: Optional[Callable[..., Dict[str, Any]]] = None
 
@@ -1901,6 +1998,26 @@ def set_retrieval_hitl_handler(handler: Optional[Callable[..., Dict[str, Any]]])
     retrieval_hitl_handler = handler
 
 
+def set_reasoning_hitl_handler(handler: Optional[Callable[..., Dict[str, Any]]]):
+    """
+    Set callback for post-reasoning review checkpoint.
+    Expected callback result:
+      {"approved": bool, "reason": str, "edited_text": str}
+    """
+    global reasoning_hitl_handler
+    reasoning_hitl_handler = handler
+
+
+def set_blueprint_hitl_handler(handler: Optional[Callable[..., Dict[str, Any]]]):
+    """
+    Set callback for post-blueprint review checkpoint.
+    Expected callback result:
+      {"approved": bool, "reason": str, "edited_text": str}
+    """
+    global blueprint_hitl_handler
+    blueprint_hitl_handler = handler
+
+
 def set_grader_stream_handler(handler: Optional[Callable[..., None]]):
     """
     Set callback to stream sanitized grader rationale.
@@ -1935,6 +2052,8 @@ __all__ = [
     "set_query_plan_hitl_handler",
     "set_answer_token_stream_handler",
     "set_retrieval_hitl_handler",
+    "set_reasoning_hitl_handler",
+    "set_blueprint_hitl_handler",
     "set_grader_stream_handler",
     "set_web_hitl_handler",
     "SOURCE_FILES",

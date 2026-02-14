@@ -34,7 +34,9 @@ function MessageBubble({
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"} mb-6`}>
       <div
-        className={`max-w-[85%] ${isUser ? "text-right" : "text-left"}`}
+        className={`max-w-[85%] ${isUser ? "text-right" : "text-left"} ${
+          disableActions ? "opacity-60 pointer-events-none select-none" : ""
+        }`}
         title={`Sent at ${timeString}`}
       >
         {/* Message content */}
@@ -48,7 +50,16 @@ function MessageBubble({
           }`}
         >
           {/* Inline Web Search Results */}
-          {message.webResults ? (
+          {message.hitlSnapshot ? (
+            <HITLModal snapshot={message.hitlSnapshot} readOnly />
+          ) : message.thinkingChapter ? (
+            <div className="mb-1 text-xs italic text-zinc-500">
+              <span className="mr-2 text-zinc-400">
+                {message.thinkingChapter.phase === "reasoning" ? "Reasoning:" : "Thinking:"}
+              </span>
+              <span className="whitespace-pre-wrap">{message.thinkingChapter.text}</span>
+            </div>
+          ) : message.webResults ? (
             <WebSearchResultsInline
               results={message.webResults.results}
               summary={message.webResults.summary}
@@ -182,6 +193,7 @@ export function ChatHistory() {
     graderThinking,
   } = usePipelineStore();
   const bottomRef = useRef<HTMLDivElement>(null);
+  const disableInlineHistory = status === "hitl_waiting";
 
   // Auto-scroll only on message boundaries, not every streamed token.
   useEffect(() => {
@@ -212,6 +224,7 @@ export function ChatHistory() {
           key={message.id}
           message={message}
           disableActions={
+            disableInlineHistory ||
             Boolean(resolvedActionMessages[message.id]) ||
             (Boolean(messageActionableMap[message.id]) &&
               messageActionableMap[message.id] !== activeRunId)
@@ -220,7 +233,9 @@ export function ChatHistory() {
       ))}
       {graderThinking.text && (status === "running" || status === "hitl_waiting") && (
         <div className="mb-5 text-xs italic text-zinc-500">
-          <span className="mr-2 text-zinc-400">Thinking:</span>
+          <span className="mr-2 text-zinc-400">
+            {graderThinking.phase === "reasoning" ? "Reasoning:" : "Thinking:"}
+          </span>
           <TypewriterText text={graderThinking.text} speed={2} />
         </div>
       )}

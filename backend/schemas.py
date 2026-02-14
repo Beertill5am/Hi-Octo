@@ -58,6 +58,10 @@ class HITLDecision(BaseModel):
     """HITL approval/rejection decision."""
     approved: bool = Field(..., description="Whether user approved")
     feedback: Optional[str] = Field(None, description="Optional user feedback")
+    edited_text: Optional[str] = Field(
+        None,
+        description="Optional user-edited text used by reasoning_review/blueprint_review HITL",
+    )
 
 
 class QueryPlanDecision(BaseModel):
@@ -157,8 +161,14 @@ class HITLPendingData(BaseModel):
     """
     job_id: str
     query: str
-    hitl_type: str = Field("web_search_review", description="web_search_review | retrieval_review | pre_web_search_review")
+    hitl_type: str = Field(
+        "web_search_review",
+        description="web_search_review | retrieval_review | pre_web_search_review | reasoning_review | blueprint_review",
+    )
     ai_summary: Optional[str] = None
+    reasoning_text: Optional[str] = None
+    blueprint_text: Optional[str] = None
+    editable_text: Optional[str] = None
     search_results: List[EnhancedSearchResult] = Field(default_factory=list)
     # Transparency metadata
     total_results_found: int = Field(0, description="Total results from search")

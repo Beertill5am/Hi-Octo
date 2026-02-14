@@ -44,9 +44,9 @@ export interface EnhancedSearchResult {
   title: string;
   url: string;
   snippet: string;
-  full_content?: string;  // Full markdown for preview
-  relevance_score: number;  // 0.0-1.0
-  domain: string;  // e.g., "python.org"
+  full_content?: string; // Full markdown for preview
+  relevance_score: number; // 0.0-1.0
+  domain: string; // e.g., "python.org"
   word_count: number;
   retrieved_at: string;
   source_id?: string;
@@ -56,16 +56,24 @@ export interface EnhancedSearchResult {
 
 export interface HITLPendingData {
   job_id: string;
-  hitl_type?: "web_search_review" | "retrieval_review" | "pre_web_search_review";
+  hitl_type?:
+    | "web_search_review"
+    | "retrieval_review"
+    | "pre_web_search_review"
+    | "reasoning_review"
+    | "blueprint_review";
   query: string;
   ai_summary?: string;
+  reasoning_text?: string;
+  blueprint_text?: string;
+  editable_text?: string;
   search_results: EnhancedSearchResult[];
   // Transparency metadata
   total_results_found: number;
   results_shown: number;
-  search_depth: string;  // "basic" or "advanced"
+  search_depth: string; // "basic" or "advanced"
   search_latency_ms: number;
-  reason_for_web_search: string;  // WHY search triggered
+  reason_for_web_search: string; // WHY search triggered
   requires_approval: boolean;
   message: string;
 }
@@ -110,25 +118,28 @@ export interface QueryPlanPendingData {
  */
 export async function startPipeline(
   topic: string,
-  mode: RunMode = "rag"
+  mode: RunMode = "rag",
 ): Promise<PipelineRunResponse> {
   const response = await fetch(`${API_BASE}/pipeline/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ topic, mode }),
   });
-  
+
   if (!response.ok) {
     throw new Error(`Failed to start pipeline: ${response.statusText}`);
   }
-  
+
   return response.json();
 }
 
 /**
  * Classify intent before running the pipeline
  */
-export async function getIntent(query: string, context?: string[]): Promise<IntentResponse> {
+export async function getIntent(
+  query: string,
+  context?: string[],
+): Promise<IntentResponse> {
   const payload: IntentRequest = { query };
   if (context && context.length > 0) {
     payload.context = context;
@@ -147,14 +158,13 @@ export async function getIntent(query: string, context?: string[]): Promise<Inte
   return response.json();
 }
 
-
 /**
  * Subscribe to pipeline status updates via SSE
  */
 export function subscribeToPipelineStatus(
   jobId: string,
   onEvent: (event: SSEEvent) => void,
-  onError?: (error: Error) => void
+  onError?: (error: Error) => void,
 ): () => void {
   let eventSource: EventSource | null = null;
   let manuallyClosed = false;
@@ -179,7 +189,9 @@ export function subscribeToPipelineStatus(
 
   const connect = () => {
     const suffix = lastSeq > 0 ? `?last_seq=${lastSeq}` : "";
-    eventSource = new EventSource(`${API_BASE}/pipeline/status/${jobId}${suffix}`);
+    eventSource = new EventSource(
+      `${API_BASE}/pipeline/status/${jobId}${suffix}`,
+    );
 
     eventSource.onmessage = (event) => {
       try {
@@ -237,13 +249,15 @@ export function subscribeToPipelineStatus(
 /**
  * Get pipeline result
  */
-export async function getPipelineResult(jobId: string): Promise<PipelineResult> {
+export async function getPipelineResult(
+  jobId: string,
+): Promise<PipelineResult> {
   const response = await fetch(`${API_BASE}/pipeline/result/${jobId}`);
-  
+
   if (!response.ok) {
     throw new Error(`Failed to get result: ${response.statusText}`);
   }
-  
+
   return response.json();
 }
 
@@ -252,24 +266,28 @@ export async function getPipelineResult(jobId: string): Promise<PipelineResult> 
  */
 export async function getHITLPending(jobId: string): Promise<HITLPendingData> {
   const response = await fetch(`${API_BASE}/hitl/pending/${jobId}`);
-  
+
   if (!response.ok) {
     throw new Error(`Failed to get HITL data: ${response.statusText}`);
   }
-  
+
   return response.json();
 }
 
 /**
  * Approve HITL checkpoint
  */
-export async function approveHITL(jobId: string, feedback?: string): Promise<void> {
+export async function approveHITL(
+  jobId: string,
+  feedback?: string,
+  editedText?: string,
+): Promise<void> {
   const response = await fetch(`${API_BASE}/hitl/approve/${jobId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ approved: true, feedback }),
+    body: JSON.stringify({ approved: true, feedback, edited_text: editedText }),
   });
-  
+
   if (!response.ok) {
     throw new Error(`Failed to approve: ${response.statusText}`);
   }
@@ -278,13 +296,16 @@ export async function approveHITL(jobId: string, feedback?: string): Promise<voi
 /**
  * Reject HITL checkpoint
  */
-export async function rejectHITL(jobId: string, reason?: string): Promise<void> {
+export async function rejectHITL(
+  jobId: string,
+  reason?: string,
+): Promise<void> {
   const response = await fetch(`${API_BASE}/hitl/reject/${jobId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ approved: false, feedback: reason }),
   });
-  
+
   if (!response.ok) {
     throw new Error(`Failed to reject: ${response.statusText}`);
   }
@@ -293,25 +314,38 @@ export async function rejectHITL(jobId: string, reason?: string): Promise<void> 
 export async function approveQueryPlan(
   jobId: string,
   editedQueries?: string[],
-  feedback?: string
+  feedback?: string,
 ): Promise<void> {
-  const response = await fetch(`${API_BASE}/pipeline/query-plan/approve/${jobId}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ approved: true, edited_queries: editedQueries, feedback }),
-  });
+  const response = await fetch(
+    `${API_BASE}/pipeline/query-plan/approve/${jobId}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approved: true,
+        edited_queries: editedQueries,
+        feedback,
+      }),
+    },
+  );
 
   if (!response.ok) {
     throw new Error(`Failed to approve query plan: ${response.statusText}`);
   }
 }
 
-export async function rejectQueryPlan(jobId: string, reason?: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/pipeline/query-plan/reject/${jobId}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ approved: false, feedback: reason }),
-  });
+export async function rejectQueryPlan(
+  jobId: string,
+  reason?: string,
+): Promise<void> {
+  const response = await fetch(
+    `${API_BASE}/pipeline/query-plan/reject/${jobId}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: false, feedback: reason }),
+    },
+  );
 
   if (!response.ok) {
     throw new Error(`Failed to reject query plan: ${response.statusText}`);
@@ -395,7 +429,10 @@ export async function getCategories(): Promise<Category[]> {
 /**
  * Create a new category
  */
-export async function createCategory(name: string, description?: string): Promise<Category> {
+export async function createCategory(
+  name: string,
+  description?: string,
+): Promise<Category> {
   const response = await fetch(`${API_BASE}/categories`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -410,10 +447,16 @@ export async function createCategory(name: string, description?: string): Promis
 /**
  * Delete a category
  */
-export async function deleteCategory(name: string, deleteResources: boolean = false): Promise<void> {
-  const response = await fetch(`${API_BASE}/categories/${encodeURIComponent(name)}?delete_resources=${deleteResources}`, {
-    method: "DELETE",
-  });
+export async function deleteCategory(
+  name: string,
+  deleteResources: boolean = false,
+): Promise<void> {
+  const response = await fetch(
+    `${API_BASE}/categories/${encodeURIComponent(name)}?delete_resources=${deleteResources}`,
+    {
+      method: "DELETE",
+    },
+  );
   if (!response.ok) {
     throw new Error(`Failed to delete category: ${response.statusText}`);
   }
@@ -423,7 +466,7 @@ export async function deleteCategory(name: string, deleteResources: boolean = fa
  * List resources, optionally filtered by category
  */
 export async function getResources(category?: string): Promise<Resource[]> {
-  const url = category 
+  const url = category
     ? `${API_BASE}/content?category=${encodeURIComponent(category)}`
     : `${API_BASE}/content`;
   const response = await fetch(url);
@@ -439,14 +482,17 @@ export async function getResources(category?: string): Promise<Resource[]> {
 export async function uploadFile(
   file: File,
   category: string,
-  metadata?: Partial<Omit<Resource, 'id' | 'filename' | 'category' | 'source_type' | 'status'>>
+  metadata?: Partial<
+    Omit<Resource, "id" | "filename" | "category" | "source_type" | "status">
+  >,
 ): Promise<Resource> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("category", category);
   if (metadata?.title) formData.append("title", metadata.title);
   if (metadata?.author) formData.append("author", metadata.author);
-  if (metadata?.published_date) formData.append("published_date", metadata.published_date);
+  if (metadata?.published_date)
+    formData.append("published_date", metadata.published_date);
   if (metadata?.source_url) formData.append("source_url", metadata.source_url);
   if (metadata?.subject) formData.append("subject", metadata.subject);
   if (metadata?.topic) formData.append("topic", metadata.topic);
@@ -458,7 +504,9 @@ export async function uploadFile(
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || `Failed to upload file: ${response.statusText}`);
+    throw new Error(
+      error.detail || `Failed to upload file: ${response.statusText}`,
+    );
   }
   return response.json();
 }
@@ -466,7 +514,9 @@ export async function uploadFile(
 /**
  * Import content from a URL
  */
-export async function importFromUrl(payload: WebImportPayload): Promise<Resource> {
+export async function importFromUrl(
+  payload: WebImportPayload,
+): Promise<Resource> {
   const response = await fetch(`${API_BASE}/content/web-import`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -474,7 +524,9 @@ export async function importFromUrl(payload: WebImportPayload): Promise<Resource
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || `Failed to import URL: ${response.statusText}`);
+    throw new Error(
+      error.detail || `Failed to import URL: ${response.statusText}`,
+    );
   }
   return response.json();
 }
@@ -503,4 +555,3 @@ export async function reindexResource(resourceId: string): Promise<Resource> {
   }
   return response.json();
 }
-

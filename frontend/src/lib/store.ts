@@ -58,6 +58,8 @@ export interface Message {
     query: string;
     modes: RunMode[];
   };
+  hitlSnapshot?: HITLSnapshot;
+  thinkingChapter?: ThinkingChapter;
 }
 
 export interface AgentNode {
@@ -83,6 +85,21 @@ export interface ReasoningLogEntry {
 export interface GraderThinkingState {
   text: string;
   done: boolean;
+  phase: string;
+}
+
+export interface ThinkingChapter {
+  id: string;
+  text: string;
+  done: boolean;
+  phase: string;
+  runId?: string;
+}
+
+export interface HITLSnapshot {
+  data: HITLPendingData;
+  decision: "approved" | "rejected";
+  decisionReason?: string;
 }
 
 
@@ -110,12 +127,14 @@ interface PipelineStore {
   liveReasoning: ReasoningLogEntry[];
   reasoningDone: boolean;
   graderThinking: GraderThinkingState;
+  thinkingChapters: ThinkingChapter[];
   streamingAnswer: string;
   answerStreaming: boolean;
   
   // HITL
   hitlData: HITLPendingData | null;
   showHITLModal: boolean;
+  hitlHistory: HITLSnapshot[];
   queryPlanData: QueryPlanPendingData | null;
   showQueryPlanModal: boolean;
 
@@ -134,9 +153,10 @@ interface PipelineStore {
     options?: { skipUserMessage?: boolean }
   ) => void;
   handleSSEEvent: (event: SSEEvent) => void;
-  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption' | 'recoveryData' | 'runId'>>) => void;
+  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption' | 'recoveryData' | 'hitlSnapshot' | 'thinkingChapter' | 'runId'>>) => void;
   markActionMessageResolved: (messageId: string) => void;
   setHITLData: (data: HITLPendingData) => void;
+  archiveCurrentHITL: (decision: "approved" | "rejected", reason?: string) => void;
   closeHITLModal: () => void;
   closeQueryPlanModal: () => void;
   openSourcePicker: (data: SourcePickerData) => void;
@@ -158,11 +178,13 @@ const initialState = {
   resolvedActionMessages: {},
   liveReasoning: [],
   reasoningDone: false,
-  graderThinking: { text: "", done: false },
+  graderThinking: { text: "", done: false, phase: "grading" },
+  thinkingChapters: [],
   streamingAnswer: "",
   answerStreaming: false,
   hitlData: null,
   showHITLModal: false,
+  hitlHistory: [],
   queryPlanData: null,
   showQueryPlanModal: false,
   showSourcePicker: false,
@@ -196,9 +218,11 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       resolvedActionMessages: {},
       liveReasoning: [],
       reasoningDone: false,
-      graderThinking: { text: "", done: false },
+      graderThinking: { text: "", done: false, phase: "grading" },
+      thinkingChapters: [],
       streamingAnswer: "",
       answerStreaming: false,
+      hitlHistory: [],
     });
     
     // Add user message
@@ -261,14 +285,18 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           hitlData: normalizedHitlData,
           showHITLModal: true,
         });
-        get().addMessage(
-          "system",
-          (raw.hitl_type as string | undefined) === "retrieval_review"
-            ? "⏸️ Waiting for your approval on retrieved citations before generation..."
-            : (raw.hitl_type as string | undefined) === "pre_web_search_review"
-            ? "⏸️ Waiting for your approval to run web search..."
-            : "⏸️ Waiting for your approval on web search results..."
-        );
+        const hitlType = raw.hitl_type as string | undefined;
+        const statusMessage =
+          hitlType === "retrieval_review"
+            ? "Waiting for your approval on retrieved citations before generation..."
+            : hitlType === "pre_web_search_review"
+            ? "Waiting for your approval to run web search..."
+            : hitlType === "reasoning_review"
+            ? "Waiting for your review of model reasoning before draft generation..."
+            : hitlType === "blueprint_review"
+            ? "Waiting for your review of the blueprint before article generation..."
+            : "Waiting for your approval on web search results...";
+        get().addMessage("system", statusMessage);
         break;
       }
 
@@ -345,11 +373,64 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       case "grader_update":
         set((state) => {
           const incoming = String(data.text || "");
-          const append = incoming
-            ? `${state.graderThinking.text}${state.graderThinking.text ? "\n" : ""}${incoming}`
-            : state.graderThinking.text;
           const meta = (data as { meta?: Record<string, unknown> }).meta || {};
+          const shouldReplace = Boolean(meta.replace);
           const verified = Array.isArray(meta.verified_citations) ? meta.verified_citations : [];
+          const phase = String(data.phase || state.graderThinking.phase || "grading");
+          const chapters = [...state.thinkingChapters];
+          const chapterMessages = [...state.messages];
+          let activeThinking = state.graderThinking;
+          const runId = state.activeRunId || state.jobId || undefined;
+
+          if (shouldReplace && activeThinking.text.trim()) {
+            const archivedChapter: ThinkingChapter = {
+              id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              text: activeThinking.text.trim(),
+              done: true,
+              phase: activeThinking.phase,
+              runId,
+            };
+            chapters.push(archivedChapter);
+            chapterMessages.push({
+              id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              role: "assistant",
+              content: "",
+              timestamp: new Date(),
+              runId,
+              thinkingChapter: archivedChapter,
+            });
+            activeThinking = { text: "", done: false, phase };
+          }
+
+          const append = incoming
+            ? `${activeThinking.text}${activeThinking.text ? "\n" : ""}${incoming}`
+            : activeThinking.text;
+          let nextThinking: GraderThinkingState = {
+            text: append.trim(),
+            done: Boolean(data.done),
+            phase,
+          };
+
+          if (Boolean(data.done) && nextThinking.text) {
+            const finishedChapter: ThinkingChapter = {
+              id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              text: nextThinking.text,
+              done: true,
+              phase: nextThinking.phase,
+              runId,
+            };
+            chapters.push(finishedChapter);
+            chapterMessages.push({
+              id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              role: "assistant",
+              content: "",
+              timestamp: new Date(),
+              runId,
+              thinkingChapter: finishedChapter,
+            });
+            nextThinking = { text: "", done: false, phase: nextThinking.phase };
+          }
+
           const preloadHitl =
             Boolean(data.done) &&
             verified.length > 0 &&
@@ -370,10 +451,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
               }
             : state.hitlData;
           return {
-            graderThinking: {
-              text: append.trim(),
-              done: Boolean(data.done),
-            },
+            graderThinking: nextThinking,
+            thinkingChapters: chapters.slice(-100),
+            messages: chapterMessages,
             hitlData: preloadedHitlData,
           };
         });
@@ -443,6 +523,8 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         webResults: options?.webResults,
         showReportOption: options?.showReportOption,
         recoveryData: options?.recoveryData,
+        hitlSnapshot: options?.hitlSnapshot,
+        thinkingChapter: options?.thinkingChapter,
         runId,
       };
 
@@ -468,6 +550,33 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   setHITLData: (data) => {
     set({ hitlData: data, showHITLModal: true });
   },
+
+  archiveCurrentHITL: (decision, reason) => {
+    set((state) => {
+      if (!state.hitlData) {
+        return {};
+      }
+      const snapshot: HITLSnapshot = {
+        data: state.hitlData,
+        decision,
+        decisionReason: reason,
+      };
+      const snapshotMessage: Message = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        role: "assistant",
+        content: "",
+        timestamp: new Date(),
+        runId: state.activeRunId || state.jobId || undefined,
+        hitlSnapshot: snapshot,
+      };
+      return {
+        hitlHistory: [...state.hitlHistory, snapshot],
+        messages: [...state.messages, snapshotMessage],
+        hitlData: null,
+        showHITLModal: false,
+      };
+    });
+  },
   
   closeHITLModal: () => {
     set({ showHITLModal: false });
@@ -489,3 +598,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     set(initialState);
   },
 }));
+
+
+
+
