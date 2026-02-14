@@ -397,7 +397,10 @@ class PipelineRunner:
         """Forward sanitized grader rationale chunks to SSE."""
         job = self.jobs.get(job_id)
         loop = self._main_loop
-        if not job or loop is None or not text:
+        is_critic_summary = phase == "critic_summary" and bool(meta)
+        if not job or loop is None:
+            return
+        if not text and not is_critic_summary:
             return
 
         payload: Dict[str, Any] = {
@@ -410,7 +413,11 @@ class PipelineRunner:
 
         try:
             asyncio.run_coroutine_threadsafe(
-                self._emit_event(job, "grader_update", payload),
+                self._emit_event(
+                    job,
+                    "critic_summary" if is_critic_summary else "grader_update",
+                    payload
+                ),
                 loop
             ).result(timeout=self.THREAD_EMIT_TIMEOUT_S)
         except Exception:

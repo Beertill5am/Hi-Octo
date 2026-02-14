@@ -10,6 +10,7 @@ import { QuickReplies } from "./QuickReplies";
 import { WebSearchResultsInline } from "./WebSearchResultsInline";
 import { HITLModal } from "./HITLModal";
 import { QueryPlanModal } from "./QueryPlanModal";
+import { CriticSummaryCard } from "./CriticSummaryCard";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 function ThinkingBlock({ label, text }: { label: string; text: string }) {
@@ -45,6 +46,8 @@ function MessageBubble({
   const isSystem = message.role === "system";
   const isAssistant = message.role === "assistant";
   const [showFullText, setShowFullText] = useState(!message.isNew);
+  const lockInteractiveControls =
+    disableActions && Boolean(message.showQuickReplies || message.recoveryData);
 
   const timeString = message.timestamp.toLocaleTimeString([], {
     hour: "2-digit",
@@ -59,7 +62,7 @@ function MessageBubble({
     <div className={`flex ${isUser ? "justify-end" : "justify-start"} mb-6`}>
       <div
         className={`max-w-[85%] ${isUser ? "text-right" : "text-left"} ${
-          disableActions ? "opacity-60 pointer-events-none select-none" : ""
+          lockInteractiveControls ? "opacity-60 select-none" : ""
         }`}
         title={`Sent at ${timeString}`}
       >
@@ -76,6 +79,8 @@ function MessageBubble({
           {/* Inline Web Search Results */}
           {message.hitlSnapshot ? (
             <HITLModal snapshot={message.hitlSnapshot} readOnly />
+          ) : message.criticSummary ? (
+            <CriticSummaryCard summary={message.criticSummary} />
           ) : message.thinkingChapter ? (
             <ThinkingBlock
               label={message.thinkingChapter.phase === "reasoning" ? "Reasoning" : "Thinking"}
@@ -204,7 +209,6 @@ export function ChatHistory() {
     messageActionableMap,
     resolvedActionMessages,
     status,
-    hitlData,
     showHITLModal,
     graderThinking,
     showQueryPlanModal,
@@ -235,7 +239,7 @@ export function ChatHistory() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-6">
+    <div className="octo-scrollbar flex-1 overflow-y-auto px-4 py-6">
       {messages.map((message) => (
         <MessageBubble
           key={message.id}
@@ -248,21 +252,21 @@ export function ChatHistory() {
           }
         />
       ))}
-      {graderThinking.text && (status === "running" || status === "hitl_waiting") && (
+      {graderThinking.text && (
         <ThinkingBlock
           label={graderThinking.phase === "reasoning" ? "Reasoning" : "Thinking"}
           text={graderThinking.text}
         />
       )}
       {showQueryPlanModal && <QueryPlanModal />}
-      {(showHITLModal || (status === "hitl_waiting" && !!hitlData)) && <HITLModal />}
-      {answerStreaming && streamingAnswer && (
+      {showHITLModal && <HITLModal />}
+      {streamingAnswer && (
         <div className="flex justify-start mb-6">
           <div className="max-w-[85%] text-left">
             <div className="text-sm leading-relaxed text-foreground">
               <div className="prose prose-sm dark:prose-invert max-w-none prose-pre:bg-muted prose-pre:border prose-pre:border-border prose-code:text-violet-400 prose-headings:text-foreground prose-p:text-foreground prose-li:text-foreground prose-strong:text-foreground prose-a:text-violet-400 hover:prose-a:text-violet-300">
                 <div className="whitespace-pre-wrap break-words">{streamingAnswer}</div>
-                <span className="animate-pulse">▋</span>
+                {answerStreaming && <span className="animate-pulse">▋</span>}
               </div>
             </div>
           </div>

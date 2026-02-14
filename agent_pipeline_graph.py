@@ -1654,6 +1654,27 @@ def critic_node(state: AgentState):
 
     print(f"  [CRITIC] Score: {result.score}/10 | Accepted: {result.accepted}")
 
+    # Emit critic summary to frontend (visible on BOTH approval & rejection paths)
+    if grader_stream_handler:
+        try:
+            grader_stream_handler(
+                job_id=state["job_id"],
+                text="",
+                phase="critic_summary",
+                done=True,
+                meta={
+                    "replace": True,
+                    "critic_score": result.score,
+                    "critic_accepted": result.accepted,
+                    "critic_feedback": result.feedback,
+                    "critic_praise": result.what_to_keep,
+                    "code_execution_logs": state.get("code_execution_logs", ""),
+                    "iteration_count": state.get("revision_count", 0),
+                }
+            )
+        except Exception as e:
+            print(f"  [CRITIC] Failed to emit summary: {e}")
+
     return {
         "critique_feedback": [result.feedback],
         "critique_praise": result.what_to_keep,

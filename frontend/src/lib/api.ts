@@ -223,6 +223,7 @@ export function subscribeToPipelineStatus(
     bind("reasoning_chunk");
     bind("reasoning_done");
     bind("grader_update");
+    bind("critic_summary");
     bind("query_plan_pending");
     bind("query_plan_approved");
     bind("query_plan_rejected");

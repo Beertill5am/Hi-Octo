@@ -35,7 +35,7 @@ export default function Home() {
       </header>
 
       {/* Chat History – scrollable, fills remaining space */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="octo-scrollbar flex-1 overflow-y-auto">
         <div className="max-w-4xl mx-auto w-full">
           <ChatHistory />
         </div>

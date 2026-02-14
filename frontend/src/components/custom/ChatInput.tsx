@@ -116,7 +116,7 @@ export function ChatInput() {
           placeholder="Ask anything…"
           disabled={isDisabled}
           rows={1}
-          className="flex-1 resize-none rounded-xl border border-border bg-muted/40 px-4 py-3 text-sm leading-relaxed text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-shadow disabled:opacity-50"
+          className="octo-scrollbar flex-1 resize-none rounded-xl border border-border bg-muted/40 px-4 py-3 text-sm leading-relaxed text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 transition-shadow disabled:opacity-50"
         />
         <Button
           type="submit"

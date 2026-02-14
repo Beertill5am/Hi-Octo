@@ -183,7 +183,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
     return () => window.clearInterval(timer);
   }, [isReadOnly, status, results.length]);
 
-  if (!snapshot && status !== "hitl_waiting") return null;
+  if (!snapshot && !showHITLModal) return null;
 
   if (!activeHitlData) {
     return (
@@ -289,7 +289,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
             value={editableText}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditableText(e.target.value)}
             readOnly={isReadOnly}
-            className="flex min-h-[150px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500"
+            className="octo-scrollbar flex min-h-[150px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500"
             placeholder="Edit the plan before full generation..."
           />
         </div>
@@ -316,7 +316,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
             value={editableText}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditableText(e.target.value)}
             readOnly={isReadOnly}
-            className="flex min-h-[200px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500"
+            className="octo-scrollbar flex min-h-[200px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500"
             placeholder="Edit the blueprint before full article generation..."
           />
         </div>
@@ -366,7 +366,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
             {showCodeLogs ? <ChevronDown className="ml-auto h-3 w-3" /> : <ChevronRight className="ml-auto h-3 w-3" />}
           </button>
           {showCodeLogs && (
-            <pre className="max-h-[200px] overflow-auto border-t border-zinc-800 px-3 py-2 text-[11px] leading-relaxed text-emerald-400 font-mono">
+            <pre className="octo-scrollbar max-h-[200px] overflow-auto border-t border-zinc-800 px-3 py-2 text-[11px] leading-relaxed text-emerald-400 font-mono">
               {codeLogs}
             </pre>
           )}
@@ -384,7 +384,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
             value={editableText}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditableText(e.target.value)}
             readOnly={isReadOnly}
-            className="flex min-h-[250px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500 font-mono leading-relaxed"
+            className="octo-scrollbar flex min-h-[250px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500 font-mono leading-relaxed"
             placeholder="Edit the draft before revision..."
           />
         </div>
@@ -422,7 +422,7 @@ export function HITLModal({ snapshot, readOnly = false }: HITLModalProps) {
             placeholder={isDraftReview ? "Optional notes for the next revision..." : isBlueprintReview ? "Optional reason for rejecting blueprint..." : isReasoningReview ? "Optional reason for rejecting reasoning..." : "Optional reason for rejection..."}
             value={rejectionReason}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setRejectionReason(e.target.value)}
-            className="flex min-h-[54px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500"
+            className="octo-scrollbar flex min-h-[54px] w-full rounded-md border border-zinc-800 bg-black px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500"
           />
           <div className="flex justify-end gap-2">
             <Button variant="outline" className="h-8 rounded-full px-3" onClick={() => setShowRejectionInput(false)}>

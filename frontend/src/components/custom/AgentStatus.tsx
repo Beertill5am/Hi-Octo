@@ -90,9 +90,9 @@ export function AgentStatus() {
 
   const statusConfig = {
     running: {
-      dot: "bg-emerald-400 animate-pulse",
+      dot: "bg-white animate-pulse ring-1 ring-zinc-300/70 dark:ring-white/30",
       label: "Working",
-      badge: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+      badge: "bg-zinc-500/15 text-zinc-200 border-zinc-500/30",
     },
     hitl_waiting: {
       dot: "bg-amber-400 animate-pulse",
@@ -220,14 +220,14 @@ export function AgentStatus() {
                 key={`${node.name}-${idx}`}
                 className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
                   isActive
-                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                    ? "border-zinc-400/40 bg-zinc-500/10 text-zinc-100"
                     : isDone
                     ? "border-border bg-muted/40 text-muted-foreground"
                     : "border-border/50 bg-transparent text-muted-foreground/60"
                 }`}
               >
                 {isActive && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
-                {isDone && <span className="text-emerald-500">✓</span>}
+                {isDone && <span className="text-violet-400">✓</span>}
                 {NODE_SHORT[node.name] || prettifyNodeName(node.name)}
                 {node.latencyMs ? (
                   <span className="opacity-60">{(node.latencyMs / 1000).toFixed(1)}s</span>

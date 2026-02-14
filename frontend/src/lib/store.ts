@@ -60,6 +60,7 @@ export interface Message {
   };
   hitlSnapshot?: HITLSnapshot;
   thinkingChapter?: ThinkingChapter;
+  criticSummary?: CriticSummary;
 }
 
 export interface AgentNode {
@@ -96,6 +97,15 @@ export interface ThinkingChapter {
   runId?: string;
 }
 
+export interface CriticSummary {
+  score: number | null;
+  accepted: boolean;
+  feedback: string;
+  praise: string;
+  codeExecutionLogs: string;
+  iterationCount: number;
+}
+
 export interface HITLSnapshot {
   data: HITLPendingData;
   decision: "approved" | "rejected";
@@ -130,6 +140,7 @@ interface PipelineStore {
   thinkingChapters: ThinkingChapter[];
   streamingAnswer: string;
   answerStreaming: boolean;
+  pendingCriticSummary: CriticSummary | null;
   
   // HITL
   hitlData: HITLPendingData | null;
@@ -153,7 +164,7 @@ interface PipelineStore {
     options?: { skipUserMessage?: boolean }
   ) => void;
   handleSSEEvent: (event: SSEEvent) => void;
-  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption' | 'recoveryData' | 'hitlSnapshot' | 'thinkingChapter' | 'runId'>>) => void;
+  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption' | 'recoveryData' | 'hitlSnapshot' | 'thinkingChapter' | 'criticSummary' | 'runId'>>) => void;
   markActionMessageResolved: (messageId: string) => void;
   setHITLData: (data: HITLPendingData) => void;
   archiveCurrentHITL: (decision: "approved" | "rejected", reason?: string) => void;
@@ -182,6 +193,7 @@ const initialState = {
   thinkingChapters: [],
   streamingAnswer: "",
   answerStreaming: false,
+  pendingCriticSummary: null,
   hitlData: null,
   showHITLModal: false,
   hitlHistory: [],
@@ -222,6 +234,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       thinkingChapters: [],
       streamingAnswer: "",
       answerStreaming: false,
+      pendingCriticSummary: null,
       hitlHistory: [],
     });
     
@@ -248,6 +261,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           currentNode: data.node as string,
           streamingAnswer: data.node === "generate" ? "" : state.streamingAnswer,
           answerStreaming: data.node === "generate" ? true : state.answerStreaming,
+          pendingCriticSummary: data.node === "generate" ? null : state.pendingCriticSummary,
           nodes: [...state.nodes, {
             name: data.node as string,
             status: "running",
@@ -299,6 +313,13 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
             ? "✏️ Draft reviewed by critic — your feedback is needed."
             : "🔍 Search results ready for your review.";
         get().addMessage("system", statusMessage);
+        if (hitlType === "draft_review") {
+          const pending = get().pendingCriticSummary;
+          if (pending) {
+            get().addMessage("assistant", "", { isNew: true, criticSummary: pending });
+            set({ pendingCriticSummary: null });
+          }
+        }
         break;
       }
 
@@ -379,6 +400,24 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           const shouldReplace = Boolean(meta.replace);
           const verified = Array.isArray(meta.verified_citations) ? meta.verified_citations : [];
           const phase = String(data.phase || state.graderThinking.phase || "grading");
+          if (phase === "critic_summary" && (meta.critic_score != null || meta.critic_feedback || meta.critic_praise)) {
+            const rawScore = meta.critic_score;
+            const score =
+              typeof rawScore === "number" && Number.isFinite(rawScore)
+                ? rawScore
+                : null;
+            const accepted = Boolean(meta.critic_accepted ?? (score != null ? score >= 8 : false));
+            return {
+              pendingCriticSummary: {
+                score,
+                accepted,
+                feedback: String(meta.critic_feedback || ""),
+                praise: String(meta.critic_praise || ""),
+                codeExecutionLogs: String(meta.code_execution_logs || ""),
+                iterationCount: Number(meta.iteration_count || 0),
+              },
+            };
+          }
           const chapters = [...state.thinkingChapters];
           const chapterMessages = [...state.messages];
           let activeThinking = state.graderThinking;
@@ -460,17 +499,41 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           };
         });
         break;
+
+      case "critic_summary": {
+        const meta = (data as { meta?: Record<string, unknown> }).meta || {};
+        const rawScore = meta.critic_score;
+        const score =
+          typeof rawScore === "number" && Number.isFinite(rawScore)
+            ? rawScore
+            : null;
+        const accepted = Boolean(meta.critic_accepted ?? (score != null ? score >= 8 : false));
+        set({
+          pendingCriticSummary: {
+            score,
+            accepted,
+            feedback: String(meta.critic_feedback || ""),
+            praise: String(meta.critic_praise || ""),
+            codeExecutionLogs: String(meta.code_execution_logs || ""),
+            iterationCount: Number(meta.iteration_count || 0),
+          },
+        });
+        break;
+      }
         
       case "complete": {
         const startedAt = get().jobStartedAt;
         const elapsed = startedAt ? Date.now() - startedAt : null;
         const streamed = get().streamingAnswer;
+        const pendingCriticSummary = get().pendingCriticSummary;
         set({
           status: "completed",
           answer: data.answer as string,
           lastLatencyMs: elapsed,
           reasoningDone: true,
           answerStreaming: false,
+          streamingAnswer: "",
+          pendingCriticSummary: null,
         });
         // Persist streamed answer to chat history (web flow already renders its own card).
         if (!data.show_report_option) {
@@ -478,6 +541,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           if (finalContent.trim()) {
             get().addMessage("assistant", finalContent, { isNew: false });
           }
+        }
+        if (pendingCriticSummary) {
+          get().addMessage("assistant", "", { isNew: true, criticSummary: pendingCriticSummary });
         }
         break;
       }
@@ -527,6 +593,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         recoveryData: options?.recoveryData,
         hitlSnapshot: options?.hitlSnapshot,
         thinkingChapter: options?.thinkingChapter,
+        criticSummary: options?.criticSummary,
         runId,
       };
 
@@ -600,7 +667,3 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     set(initialState);
   },
 }));
-
-
-
-

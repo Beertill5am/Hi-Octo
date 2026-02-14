@@ -124,3 +124,41 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Consistent, darker scrollbars for chat + text surfaces in dark theme. */
+.octo-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.42 0 0) oklch(0.20 0 0);
+}
+
+.octo-scrollbar::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.octo-scrollbar::-webkit-scrollbar-track {
+  background: oklch(0.20 0 0);
+}
+
+.octo-scrollbar::-webkit-scrollbar-thumb {
+  background: oklch(0.42 0 0);
+  border-radius: 9999px;
+  border: 2px solid oklch(0.20 0 0);
+}
+
+.octo-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.50 0 0);
+}
+
+.dark .octo-scrollbar {
+  scrollbar-color: oklch(0.36 0 0) oklch(0.17 0 0);
+}
+
+.dark .octo-scrollbar::-webkit-scrollbar-track {
+  background: oklch(0.17 0 0);
+}
+
+.dark .octo-scrollbar::-webkit-scrollbar-thumb {
+  background: oklch(0.36 0 0);
+  border-color: oklch(0.17 0 0);
+}
