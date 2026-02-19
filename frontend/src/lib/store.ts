@@ -2,7 +2,7 @@
  * Zustand store for pipeline state management
  */
 import { create } from "zustand";
-import { SSEEvent, HITLPendingData, QueryPlanPendingData, RunMode } from "./api";
+import { SSEEvent, HITLPendingData, QueryPlanPendingData, RunMode, VideoResultData } from "./api";
 
 if (typeof window !== "undefined") {
   window.localStorage.removeItem("octo-pipeline-store");
@@ -59,8 +59,10 @@ export interface Message {
     modes: RunMode[];
   };
   hitlSnapshot?: HITLSnapshot;
+  queryPlanReview?: QueryPlanReview;
   thinkingChapter?: ThinkingChapter;
   criticSummary?: CriticSummary;
+  videoResult?: VideoResultData;
 }
 
 export interface AgentNode {
@@ -112,6 +114,18 @@ export interface HITLSnapshot {
   decisionReason?: string;
 }
 
+export interface QueryPlanSnapshot {
+  decision: "approved" | "rejected";
+  reason?: string;
+}
+
+export interface QueryPlanReview {
+  data: QueryPlanPendingData;
+  active: boolean;
+  decision?: "approved" | "rejected";
+  reason?: string;
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STORE
@@ -148,6 +162,7 @@ interface PipelineStore {
   hitlHistory: HITLSnapshot[];
   queryPlanData: QueryPlanPendingData | null;
   showQueryPlanModal: boolean;
+  queryPlanSnapshot: QueryPlanSnapshot | null;
 
   // Source selection
   showSourcePicker: boolean;
@@ -164,7 +179,7 @@ interface PipelineStore {
     options?: { skipUserMessage?: boolean }
   ) => void;
   handleSSEEvent: (event: SSEEvent) => void;
-  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption' | 'recoveryData' | 'hitlSnapshot' | 'thinkingChapter' | 'criticSummary' | 'runId'>>) => void;
+  addMessage: (role: Message["role"], content: string, options?: Partial<Pick<Message, 'isNew' | 'showQuickReplies' | 'quickReplyData' | 'webResults' | 'showReportOption' | 'recoveryData' | 'hitlSnapshot' | 'queryPlanReview' | 'thinkingChapter' | 'criticSummary' | 'videoResult' | 'runId'>>) => void;
   markActionMessageResolved: (messageId: string) => void;
   setHITLData: (data: HITLPendingData) => void;
   archiveCurrentHITL: (decision: "approved" | "rejected", reason?: string) => void;
@@ -199,6 +214,7 @@ const initialState = {
   hitlHistory: [],
   queryPlanData: null,
   showQueryPlanModal: false,
+  queryPlanSnapshot: null,
   showSourcePicker: false,
   sourcePickerData: null,
   answer: null,
@@ -222,6 +238,7 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       showHITLModal: false,
       queryPlanData: null,
       showQueryPlanModal: false,
+      queryPlanSnapshot: null,
       showSourcePicker: false,
       sourcePickerData: null,
       answer: null,
@@ -247,6 +264,74 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   
   handleSSEEvent: (event: SSEEvent) => {
     const { event: eventType, data } = event;
+    const upsertQueryPlanReview = (incoming: QueryPlanReview) => {
+      set((state) => {
+        let hasUpdated = false;
+        const messages = state.messages.map((message) => {
+          const existingJobId = message.queryPlanReview?.data?.job_id;
+          if (existingJobId !== incoming.data.job_id) {
+            return message;
+          }
+          hasUpdated = true;
+          return {
+            ...message,
+            timestamp: new Date(),
+            queryPlanReview: {
+              ...message.queryPlanReview,
+              ...incoming,
+              data: { ...message.queryPlanReview?.data, ...incoming.data },
+            },
+          };
+        });
+
+        if (hasUpdated) {
+          return { messages };
+        }
+
+        const runId = state.activeRunId || state.jobId || undefined;
+        const reviewMessage: Message = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          role: "assistant",
+          content: "",
+          timestamp: new Date(),
+          runId,
+          queryPlanReview: incoming,
+        };
+        return { messages: [...messages, reviewMessage] };
+      });
+    };
+
+    const upsertVideoResult = (incoming: VideoResultData) => {
+      set((state) => {
+        let hasUpdated = false;
+        const messages = state.messages.map((message) => {
+          if (message.videoResult?.job_id !== incoming.job_id) {
+            return message;
+          }
+          hasUpdated = true;
+          return {
+            ...message,
+            timestamp: new Date(),
+            videoResult: { ...message.videoResult, ...incoming },
+          };
+        });
+
+        if (hasUpdated) {
+          return { messages };
+        }
+
+        const runId = state.activeRunId || state.jobId || undefined;
+        const videoMessage: Message = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          role: "assistant",
+          content: "",
+          timestamp: new Date(),
+          runId,
+          videoResult: incoming,
+        };
+        return { messages: [...messages, videoMessage] };
+      });
+    };
     
     switch (eventType) {
       case "pipeline_start":
@@ -300,6 +385,21 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           showHITLModal: true,
         });
         const hitlType = raw.hitl_type as string | undefined;
+        if (hitlType === "draft_review") {
+          const draftFromHitl = String(normalizedHitlData.current_draft || "").trim();
+          const streamedDraft = get().streamingAnswer.trim();
+          const draftToPersist = draftFromHitl || streamedDraft;
+          if (draftToPersist) {
+            const existingMessages = get().messages;
+            const lastAssistantWithText = [...existingMessages]
+              .reverse()
+              .find((m) => m.role === "assistant" && m.content.trim());
+            if (lastAssistantWithText?.content.trim() !== draftToPersist) {
+              get().addMessage("assistant", draftToPersist, { isNew: false });
+            }
+          }
+          set({ streamingAnswer: "", answerStreaming: false });
+        }
         const statusMessage =
           hitlType === "retrieval_review"
             ? "📋 Please review the sources before I generate your answer."
@@ -324,30 +424,74 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
       }
 
       case "query_plan_pending":
+        {
+        const pendingData = data as unknown as QueryPlanPendingData;
         set({
           status: "hitl_waiting",
-          queryPlanData: data as unknown as QueryPlanPendingData,
-          showQueryPlanModal: true,
+          queryPlanData: pendingData,
+          showQueryPlanModal: false,
+          queryPlanSnapshot: null,
+        });
+        upsertQueryPlanReview({
+          data: pendingData,
+          active: true,
         });
         get().addMessage("system", "📋 Review the search plan before I begin retrieval.");
         break;
+      }
 
       case "query_plan_approved":
+        {
+        const alreadyApproved = get().queryPlanSnapshot?.decision === "approved";
+        const activeQueryPlanData = get().queryPlanData;
         set({
           status: "running",
           showQueryPlanModal: false,
+          queryPlanSnapshot: { decision: "approved" },
         });
-        get().addMessage("system", "Plan approved — starting retrieval.");
+        if (activeQueryPlanData) {
+          upsertQueryPlanReview({
+            data: activeQueryPlanData,
+            active: false,
+            decision: "approved",
+          });
+        }
+        if (!alreadyApproved) {
+          get().addMessage("system", "Plan approved — starting retrieval.");
+        }
         break;
+      }
 
       case "query_plan_rejected":
+        {
+        const priorSnapshot = get().queryPlanSnapshot;
+        const rejectionReason = data.reason ? String(data.reason) : undefined;
+        const alreadyRejected =
+          priorSnapshot?.decision === "rejected" &&
+          priorSnapshot.reason === rejectionReason;
+        const activeQueryPlanData = get().queryPlanData;
         set({
           status: "failed",
           showQueryPlanModal: false,
+          queryPlanSnapshot: {
+            decision: "rejected",
+            reason: rejectionReason,
+          },
           answerStreaming: false,
         });
-        get().addMessage("system", `Plan declined${data.reason ? `: ${String(data.reason)}` : "."}`);
+        if (activeQueryPlanData) {
+          upsertQueryPlanReview({
+            data: activeQueryPlanData,
+            active: false,
+            decision: "rejected",
+            reason: rejectionReason,
+          });
+        }
+        if (!alreadyRejected) {
+          get().addMessage("system", `Plan declined${data.reason ? `: ${String(data.reason)}` : "."}`);
+        }
         break;
+      }
 
       case "answer_token":
         set((state) => ({
@@ -370,6 +514,13 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
           webResults: data as Message["webResults"],
           showReportOption: true,
         });
+        break;
+
+      case "video_pending":
+      case "video_rendering":
+      case "video_ready":
+      case "video_failed":
+        upsertVideoResult(data as VideoResultData);
         break;
 
       case "reasoning_chunk":
@@ -572,6 +723,9 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         set({ status: "failed", reasoningDone: true, answerStreaming: false });
         get().addMessage("system", `Cancelled${data.reason ? ` — ${String(data.reason)}` : "."}`);
         break;
+
+      case "pipeline_done":
+        break;
     }
   },
   
@@ -592,8 +746,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
         showReportOption: options?.showReportOption,
         recoveryData: options?.recoveryData,
         hitlSnapshot: options?.hitlSnapshot,
+        queryPlanReview: options?.queryPlanReview,
         thinkingChapter: options?.thinkingChapter,
         criticSummary: options?.criticSummary,
+        videoResult: options?.videoResult,
         runId,
       };
 

@@ -117,6 +117,21 @@ export interface QueryPlanPendingData {
   message: string;
 }
 
+export interface VideoResultData {
+  job_id: string;
+  status: "pending" | "rendering" | "ready" | "failed";
+  title?: string;
+  video_url?: string;
+  poster_url?: string;
+  duration_ms?: number;
+  aspect_ratio?: string;
+  progress_pct?: number;
+  message?: string;
+  error?: string;
+  quality_profile?: string;
+  tts_enabled?: boolean;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // API FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -179,7 +194,7 @@ export function subscribeToPipelineStatus(
   let reconnectAttempts = 0;
   let lastSeq = 0;
 
-  const terminalEvents = new Set(["cancelled", "complete", "error"]);
+  const terminalEvents = new Set(["cancelled", "pipeline_done", "error"]);
 
   const parseEvent = (name: string, event: Event) => {
     const messageEvent = event as MessageEvent;
@@ -229,6 +244,11 @@ export function subscribeToPipelineStatus(
     bind("query_plan_rejected");
     bind("answer_token");
     bind("answer_done");
+    bind("video_pending");
+    bind("video_rendering");
+    bind("video_ready");
+    bind("video_failed");
+    bind("pipeline_done");
     bind("cancelled");
     bind("complete");
     bind("error");

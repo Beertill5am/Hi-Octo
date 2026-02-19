@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { usePipelineStore } from "@/lib/store";
+import { QueryPlanReview, usePipelineStore } from "@/lib/store";
 import { approveQueryPlan, rejectQueryPlan } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,11 +17,16 @@ import {
   XCircle,
 } from "lucide-react";
 
-export function QueryPlanModal() {
+interface QueryPlanModalProps {
+  snapshot?: QueryPlanReview;
+  readOnly?: boolean;
+}
+
+export function QueryPlanModal({ snapshot, readOnly = false }: QueryPlanModalProps) {
   const {
     showQueryPlanModal,
     queryPlanData,
-    closeQueryPlanModal,
+    queryPlanSnapshot,
     jobId,
     handleSSEEvent,
   } = usePipelineStore();
@@ -33,16 +38,26 @@ export function QueryPlanModal() {
   const [showFeedback, setShowFeedback] = useState(false);
   const [expanded, setExpanded] = useState(true);
 
+  const activeQueryPlanData = snapshot?.data ?? (showQueryPlanModal ? queryPlanData : null);
+  const effectiveDecision = snapshot?.decision ?? queryPlanSnapshot?.decision;
+  const effectiveReason = snapshot?.reason ?? queryPlanSnapshot?.reason;
+  const isExternallyFinalized = readOnly || (snapshot ? !snapshot.active : false);
+
   useEffect(() => {
-    if (showQueryPlanModal && queryPlanData) {
-      setQueries(queryPlanData.queries || []);
+    if (activeQueryPlanData && !effectiveDecision && !isExternallyFinalized) {
+      setQueries(activeQueryPlanData.queries || []);
       setRejectionReason("");
       setIsApproving(false);
       setIsRejecting(false);
       setShowFeedback(false);
       setExpanded(true);
     }
-  }, [showQueryPlanModal, queryPlanData]);
+  }, [activeQueryPlanData, effectiveDecision, isExternallyFinalized]);
+
+  const isFinalized = Boolean(effectiveDecision) || isExternallyFinalized;
+  const isApproved = effectiveDecision === "approved";
+  const isRejected = effectiveDecision === "rejected";
+  const canEdit = Boolean(activeQueryPlanData?.can_edit) && !isFinalized;
 
   const updateQuery = (idx: number, value: string) => {
     setQueries((prev) => prev.map((q, i) => (i === idx ? value : q)));
@@ -69,9 +84,9 @@ export function QueryPlanModal() {
   };
 
   const regenerateQueries = () => {
-    if (!queryPlanData) return;
-    const base = queryPlanData.original_query || queryPlanData.query;
-    const category = queryPlanData.selected_category || "general";
+    if (!activeQueryPlanData) return;
+    const base = activeQueryPlanData.original_query || activeQueryPlanData.query;
+    const category = activeQueryPlanData.selected_category || "general";
     setQueries([
       `${base}`,
       `${base} examples`,
@@ -82,15 +97,15 @@ export function QueryPlanModal() {
   };
 
   const handleApprove = async () => {
-    if (!jobId) return;
+    const targetJobId = activeQueryPlanData?.job_id || jobId;
+    if (!targetJobId) return;
     const sanitized = queries.map((q) => q.trim()).filter(Boolean);
     if (!sanitized.length) return;
 
     setIsApproving(true);
     try {
-      await approveQueryPlan(jobId, sanitized);
-      closeQueryPlanModal();
-      handleSSEEvent({ event: "status_change", data: { status: "running" } });
+      await approveQueryPlan(targetJobId, sanitized);
+      handleSSEEvent({ event: "query_plan_approved", data: {} });
     } catch (error) {
       console.error("Query plan approval failed:", error);
     } finally {
@@ -99,11 +114,11 @@ export function QueryPlanModal() {
   };
 
   const handleReject = async () => {
-    if (!jobId) return;
+    const targetJobId = activeQueryPlanData?.job_id || jobId;
+    if (!targetJobId) return;
     setIsRejecting(true);
     try {
-      await rejectQueryPlan(jobId, rejectionReason || "User rejected query plan");
-      closeQueryPlanModal();
+      await rejectQueryPlan(targetJobId, rejectionReason || "User rejected query plan");
       handleSSEEvent({
         event: "query_plan_rejected",
         data: { reason: rejectionReason || "User rejected query plan" },
@@ -115,26 +130,38 @@ export function QueryPlanModal() {
     }
   };
 
-  if (!showQueryPlanModal || !queryPlanData) return null;
+  if (!activeQueryPlanData) return null;
 
   return (
-    <section className="mb-6">
+    <section className={`mb-6 ${isFinalized ? "opacity-60" : ""}`}>
       {/* Header */}
       <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
         <Search className="h-4 w-4 text-violet-400" />
         Search Plan Review
+        {isApproved && (
+          <span className="rounded-full border border-emerald-600/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-300">
+            Approved
+          </span>
+        )}
+        {isRejected && (
+          <span className="rounded-full border border-red-600/40 bg-red-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-red-300">
+            Rejected
+          </span>
+        )}
       </div>
       <p className="mb-3 text-xs text-zinc-500">
-        Review, edit, or reject generated search queries before retrieval.
+        {isFinalized
+          ? `This search plan has been ${effectiveDecision || "finalized"}.`
+          : "Review, edit, or reject generated search queries before retrieval."}
       </p>
 
       {/* Context pill */}
       <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-zinc-400">
         <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5">
-          Query: <strong className="font-mono text-zinc-200">{queryPlanData.query}</strong>
+          Query: <strong className="font-mono text-zinc-200">{activeQueryPlanData.query}</strong>
         </span>
         <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5">
-          Domain: {queryPlanData.selected_category || "unknown"}
+          Domain: {activeQueryPlanData.selected_category || "unknown"}
         </span>
       </div>
 
@@ -142,7 +169,10 @@ export function QueryPlanModal() {
       <div className="rounded-md border border-zinc-800 bg-zinc-950/70">
         <button
           type="button"
-          onClick={() => setExpanded((v) => !v)}
+          onClick={() => {
+            if (!isFinalized) setExpanded((v) => !v);
+          }}
+          disabled={isFinalized}
           className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-zinc-400 hover:text-zinc-300 transition-colors"
         >
           {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
@@ -156,7 +186,7 @@ export function QueryPlanModal() {
                 <button
                   className="shrink-0 cursor-grab text-zinc-600 hover:text-zinc-400 disabled:opacity-30"
                   title="Drag to reorder"
-                  disabled={!queryPlanData.can_edit}
+                  disabled={!canEdit}
                   onDoubleClick={() => moveQuery(idx, idx > 0 ? -1 : 1)}
                 >
                   <GripVertical className="h-3.5 w-3.5" />
@@ -164,12 +194,12 @@ export function QueryPlanModal() {
                 <input
                   value={query}
                   onChange={(e) => updateQuery(idx, e.target.value)}
-                  disabled={!queryPlanData.can_edit}
+                  disabled={!canEdit}
                   className="flex-1 rounded border border-zinc-800 bg-black/40 px-2 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-violet-500 disabled:opacity-50"
                 />
                 <button
                   onClick={() => removeQuery(idx)}
-                  disabled={!queryPlanData.can_edit}
+                  disabled={!canEdit}
                   className="shrink-0 rounded p-1 text-zinc-600 hover:text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-30"
                   title="Remove query"
                 >
@@ -182,13 +212,14 @@ export function QueryPlanModal() {
             <div className="flex gap-1.5 pt-1">
               <button
                 onClick={addQuery}
-                disabled={!queryPlanData.can_edit}
+                disabled={!canEdit}
                 className="inline-flex items-center gap-1 rounded-full border border-zinc-800 px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-300 hover:border-zinc-700 transition-colors disabled:opacity-30"
               >
                 <Plus className="h-3 w-3" /> Add
               </button>
               <button
                 onClick={regenerateQueries}
+                disabled={isFinalized}
                 className="inline-flex items-center gap-1 rounded-full border border-zinc-800 px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-300 hover:border-zinc-700 transition-colors"
               >
                 <RefreshCw className="h-3 w-3" /> Regenerate
@@ -199,7 +230,7 @@ export function QueryPlanModal() {
       </div>
 
       {/* Rejection feedback */}
-      {showFeedback ? (
+      {showFeedback && !isFinalized ? (
         <div className="mt-3 space-y-2">
           <textarea
             placeholder="Optional feedback (used if you reject)"
@@ -217,10 +248,10 @@ export function QueryPlanModal() {
             </Button>
             <Button
               variant="outline"
-              className="h-8 rounded-full border-zinc-300 bg-white px-3 text-black hover:bg-zinc-100"
-              onClick={handleReject}
-              disabled={isRejecting || isApproving}
-            >
+            className="h-8 rounded-full border-zinc-300 bg-white px-3 text-black hover:bg-zinc-100"
+            onClick={handleReject}
+            disabled={isRejecting || isApproving || isFinalized}
+          >
               {isRejecting ? (
                 <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
               ) : (
@@ -233,13 +264,17 @@ export function QueryPlanModal() {
       ) : (
         <div className="mt-3 flex items-center gap-2 border-t border-zinc-800 pt-3">
           <div className="flex-1 text-xs italic text-zinc-500">
-            Approve to begin parallel retrieval.
+            {isRejected && effectiveReason
+              ? `Reason: ${effectiveReason}`
+              : isFinalized
+              ? "Decision submitted."
+              : "Approve to begin parallel retrieval."}
           </div>
           <Button
             variant="outline"
             className="h-8 rounded-full border-zinc-300 bg-white px-3 text-black hover:bg-zinc-100"
             onClick={() => setShowFeedback(true)}
-            disabled={isApproving || isRejecting}
+            disabled={isApproving || isRejecting || isFinalized}
           >
             <XCircle className="mr-1 h-3.5 w-3.5" />
             Reject
@@ -247,7 +282,7 @@ export function QueryPlanModal() {
           <Button
             className="h-8 rounded-full bg-violet-600 px-3 text-white hover:bg-violet-500"
             onClick={handleApprove}
-            disabled={isApproving || isRejecting || !queries.some((q) => q.trim())}
+            disabled={isApproving || isRejecting || isFinalized || !queries.some((q) => q.trim())}
           >
             {isApproving ? (
               <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />

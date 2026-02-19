@@ -11,6 +11,7 @@ import { WebSearchResultsInline } from "./WebSearchResultsInline";
 import { HITLModal } from "./HITLModal";
 import { QueryPlanModal } from "./QueryPlanModal";
 import { CriticSummaryCard } from "./CriticSummaryCard";
+import { VideoResultCard } from "./VideoResultCard";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 function ThinkingBlock({ label, text }: { label: string; text: string }) {
@@ -79,6 +80,10 @@ function MessageBubble({
           {/* Inline Web Search Results */}
           {message.hitlSnapshot ? (
             <HITLModal snapshot={message.hitlSnapshot} readOnly />
+          ) : message.queryPlanReview ? (
+            <QueryPlanModal snapshot={message.queryPlanReview} readOnly={!message.queryPlanReview.active} />
+          ) : message.videoResult ? (
+            <VideoResultCard data={message.videoResult} />
           ) : message.criticSummary ? (
             <CriticSummaryCard summary={message.criticSummary} />
           ) : message.thinkingChapter ? (
@@ -211,7 +216,6 @@ export function ChatHistory() {
     status,
     showHITLModal,
     graderThinking,
-    showQueryPlanModal,
   } = usePipelineStore();
   const bottomRef = useRef<HTMLDivElement>(null);
   const disableInlineHistory = status === "hitl_waiting";
@@ -258,7 +262,6 @@ export function ChatHistory() {
           text={graderThinking.text}
         />
       )}
-      {showQueryPlanModal && <QueryPlanModal />}
       {showHITLModal && <HITLModal />}
       {streamingAnswer && (
         <div className="flex justify-start mb-6">

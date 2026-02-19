@@ -1,8 +1,11 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+.vscode/
 agent_knowledge_db/
 books/
 images/
 .env
 backend/data/
+remotion-renderer/node_modules/
+remotion-renderer/renders/

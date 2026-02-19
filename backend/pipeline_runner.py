@@ -14,6 +14,7 @@ from enum import Enum
 from langchain_ollama import ChatOllama
 from web_search_agent import WebSearchAgent, extract_domain
 import time
+from .video_generation import build_video_script, render_video_with_remotion, fallback_video_url
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -62,7 +63,10 @@ class PipelineJob:
     reasoning_seq: int = 0
     answer_token_seq: int = 0
     answer_stream_buffer: str = ""
+    answer_stream_full: str = ""
     last_stream_emit_ts: float = 0.0
+    video_result: Optional[Dict[str, Any]] = None
+    video_in_progress: bool = False
 
 
 class PipelineRunner:
@@ -100,6 +104,8 @@ class PipelineRunner:
             "draft_review_hitl": "Draft Review",
             "increment_retry": "Retry Planning",
             "summarize": "Summarization",
+            "video_summarizer": "Video Summarizer",
+            "video_generation": "Video Generation",
         }
 
     def _now_iso(self) -> str:
@@ -252,12 +258,14 @@ class PipelineRunner:
                     await self._emit_event(job, "cancelled", {"reason": reason})
                 return
             
-            # Extract answer
-            job.answer = result.get("answer", "No answer generated")
+            # Extract answer. Prefer graph final answer, then fully streamed text.
+            final_answer = str(result.get("answer") or "").strip()
+            if not final_answer:
+                final_answer = job.answer_stream_full.strip()
+            job.answer = final_answer or "No answer generated"
             job.status = JobStatus.COMPLETED
             await self._emit_event(job, "reasoning_done", {"stage": "pipeline", "summary": "Pipeline execution complete."})
-            
-            await self._emit_event(job, "complete", {"answer": job.answer})
+            await self._finalize_job_with_video(job, {"answer": job.answer})
             
         except Exception as e:
             job.status = JobStatus.FAILED
@@ -343,6 +351,8 @@ class PipelineRunner:
             return
 
         if done:
+            if final_text:
+                job.answer_stream_full = final_text
             if job.answer_stream_buffer:
                 buffered = job.answer_stream_buffer
                 job.answer_stream_buffer = ""
@@ -367,6 +377,7 @@ class PipelineRunner:
 
         if not token:
             return
+        job.answer_stream_full += token
         job.answer_stream_buffer += token
         now = time.monotonic()
         should_emit = (
@@ -766,7 +777,7 @@ class PipelineRunner:
         response = llm.invoke(prompt)
         job.answer = response.content if response else "No answer generated."
         job.status = JobStatus.COMPLETED
-        await self._emit_event(job, "complete", {"answer": job.answer})
+        await self._finalize_job_with_video(job, {"answer": job.answer})
 
     async def _run_web_job(self, job: PipelineJob):
         """
@@ -792,7 +803,7 @@ class PipelineRunner:
         if not raw_results:
             job.answer = "I couldn't find relevant web results. Try rephrasing or use your local knowledge base."
             job.status = JobStatus.COMPLETED
-            await self._emit_event(job, "complete", {"answer": job.answer})
+            await self._finalize_job_with_video(job, {"answer": job.answer})
             return
         
         # Build enhanced results with full metadata
@@ -848,11 +859,121 @@ class PipelineRunner:
         # Mark job complete - results are now displayed, user can choose next action
         job.answer = ai_summary  # Store summary as the answer
         job.status = JobStatus.COMPLETED
-        await self._emit_event(job, "complete", {
+        await self._finalize_job_with_video(job, {
             "answer": ai_summary,
             "results_count": len(enhanced_results),
             "show_report_option": True  # Frontend will show "Generate report" option
         })
+
+    async def _finalize_job_with_video(self, job: PipelineJob, complete_payload: Dict[str, Any]):
+        """
+        Emit final answer immediately, then continue streaming video render lifecycle.
+        """
+        await self._emit_event(job, "complete", complete_payload)
+        try:
+            await self._emit_video_lifecycle(job)
+        except Exception as exc:
+            job.video_in_progress = False
+            await self._emit_event(job, "video_failed", {
+                "job_id": job.job_id,
+                "status": "failed",
+                "error": str(exc),
+            })
+        await self._emit_event(job, "pipeline_done", {"status": job.status.value})
+
+    async def _emit_video_lifecycle(self, job: PipelineJob):
+        """
+        Render bespoke motion video from final answer and stream progress via SSE.
+        """
+        job.video_in_progress = True
+        answer = (job.answer or "").strip()
+        if not answer:
+            await self._emit_event(job, "video_failed", {
+                "job_id": job.job_id,
+                "status": "failed",
+                "error": "No answer content to render.",
+            })
+            job.video_in_progress = False
+            return
+
+        await self._emit_node_start(job, "video_summarizer")
+        summarize_started = time.time()
+        script = await asyncio.to_thread(build_video_script, job.topic, answer)
+        await self._emit_node_end(
+            job,
+            "video_summarizer",
+            round((time.time() - summarize_started) * 1000, 2),
+            {"scenes": len(script.get("scenes", []))}
+        )
+        await self._emit_event(job, "video_pending", {
+            "job_id": job.job_id,
+            "status": "pending",
+            "title": script.get("title") or job.topic,
+            "aspect_ratio": script.get("composition", {}).get("aspectRatio", "16:9"),
+            "duration_ms": script.get("composition", {}).get("durationMs", 0),
+            "progress_pct": 0,
+        })
+
+        await self._emit_node_start(job, "video_generation")
+        started = time.time()
+        await self._emit_event(job, "video_rendering", {
+            "job_id": job.job_id,
+            "status": "rendering",
+            "progress_pct": 20,
+            "message": "Building motion script and timeline.",
+        })
+
+        try:
+            rendered = await asyncio.to_thread(
+                render_video_with_remotion,
+                job_id=job.job_id,
+                topic=job.topic,
+                answer=answer,
+                script=script,
+            )
+            await self._emit_event(job, "video_rendering", {
+                "job_id": job.job_id,
+                "status": "rendering",
+                "progress_pct": 88,
+                "message": "Rendering high-quality frames.",
+            })
+        except Exception as remotion_error:
+            demo_url = fallback_video_url()
+            if not demo_url:
+                await self._emit_event(job, "video_failed", {
+                    "job_id": job.job_id,
+                    "status": "failed",
+                    "error": str(remotion_error),
+                })
+                await self._emit_node_end(job, "video_generation", round((time.time() - started) * 1000, 2), {"status": "failed"})
+                job.video_in_progress = False
+                return
+
+            rendered = {
+                "video_url": demo_url,
+                "poster_url": None,
+                "duration_ms": script.get("composition", {}).get("durationMs", 0),
+                "aspect_ratio": script.get("composition", {}).get("aspectRatio", "16:9"),
+                "provider_job_id": None,
+            }
+
+        payload = {
+            "job_id": job.job_id,
+            "status": "ready",
+            "title": script.get("title") or job.topic,
+            "video_url": rendered["video_url"],
+            "poster_url": rendered.get("poster_url"),
+            "duration_ms": int(rendered.get("duration_ms") or script.get("composition", {}).get("durationMs", 0)),
+            "aspect_ratio": rendered.get("aspect_ratio") or "16:9",
+            "progress_pct": 100,
+            "provider_job_id": rendered.get("provider_job_id"),
+            "quality_profile": "high",
+            "tts_enabled": False,
+        }
+        job.video_result = payload
+        await self._emit_event(job, "video_ready", payload)
+        await self._emit_node_end(job, "video_generation", round((time.time() - started) * 1000, 2), {"status": "ready"})
+        job.video_in_progress = False
     
     async def _emit_event(self, job: PipelineJob, event_type: str, data: dict):
         """Push event to job's queue for SSE streaming."""
@@ -1001,11 +1122,14 @@ class PipelineRunner:
                 yield event
                 
                 # Stop streaming on terminal events
-                if event["event"] in ["complete", "error", "cancelled"]:
+                if event["event"] in ["pipeline_done", "error", "cancelled"]:
                     break
                     
             except asyncio.TimeoutError:
-                if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+                if (
+                    job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]
+                    and not job.video_in_progress
+                ):
                     break
                 # Send keepalive while job is still active.
                 yield {"event": "keepalive", "data": {}}
