@@ -61,7 +61,25 @@ You will need the following API keys set as environment variables:
 
 1.  **Start Ollama**: Ensure your Ollama server is running (usually `ollama serve`).
 
-2.  **Run the Pipeline**:
+2.  **Start the Backend**:
+    From the root directory, start the FastAPI backend server:
+
+    ```bash
+    uvicorn backend.main:app --reload
+    ```
+    The backend runs on `http://localhost:8000`.
+
+3.  **Start the Frontend**:
+    In a new terminal, navigate to the `frontend` directory, install dependencies, and start the Next.js development server:
+
+    ```bash
+    cd frontend
+    npm install
+    npm run dev
+    ```
+    The frontend runs on `http://localhost:3000`.
+
+4.  **Run the Pipeline**:
     The main entry point for the pipeline is `agent_pipeline.py` (facade) or typically you would interact with the graph defined in `agent_pipeline_graph.py`.
 
     _Note: Adjust `agent_pipeline_graph.py` or create a `main.py` driver script as needed for your specific use case._
